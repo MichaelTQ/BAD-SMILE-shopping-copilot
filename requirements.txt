@@ -1,3 +1,6 @@
 # Runtime dependencies
 # The baseline agent uses only the Python standard library.
 # Add project dependencies here as the agent evolves.
+# The submitted agent still uses only the Python standard library:
+# no LLM, no API client, no network access. SQLite must include FTS5
+# (default in CPython 3.10+). See METHOD.md.

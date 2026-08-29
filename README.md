@@ -40,6 +40,11 @@ Python 3.10 or later is recommended. The starter uses only the Python standard l
 python3 -m evaluator.local_evaluator
 ```
 
+See `METHOD.md` for this team's offline rule-based agent (no LLM, no network,
+0 tokens): Hit Rate@10 `0.985`, MRR `0.752599`, MTTC `1.90`, TechnicalScore
+`0.90028` versus the `0.10671` BM25 baseline. Print one full session with
+`python3 -m scripts.demo_session --scenario intent_override`.
+
 Edit `starter/agent.py` to implement your system. Do not edit the evaluator or public labels when reporting your local score.
 The command writes per-session results and aggregate metrics to `results.json`.
 

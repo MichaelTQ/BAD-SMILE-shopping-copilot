@@ -19,3 +19,4 @@ tests/test_organizer_pipeline.py
 
 # Internal planning notes (not for public release).
 CompetitionBackground.md
+PROJECT_BRIEF.md
