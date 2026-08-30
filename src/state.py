@@ -38,6 +38,10 @@ class SessionState:
 
     turns: int = 0
     overrides: int = 0
+    # Consecutive turns that produced no new information. Drives exploration:
+    # if the customer keeps adding nothing and the target has not surfaced,
+    # the current Top 10 is simply wrong and needs to rotate.
+    stalled_turns: int = 0
 
     # -------------------------------------------------------------- updating
 
@@ -77,6 +81,9 @@ class SessionState:
             self.answered.add(self.last_asked)
             if not gained and not parsed.override and not parsed.nudge:
                 self.no_preference.add(self.last_asked)
+
+        informative = gained or bool(parsed.category) or parsed.budget is not None
+        self.stalled_turns = 0 if informative else self.stalled_turns + 1
 
     def _find(self, key: tuple[str, str]) -> int | None:
         for index, constraint in enumerate(self.constraints):

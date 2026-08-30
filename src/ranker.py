@@ -27,6 +27,11 @@ W_PHRASE = 1.2
 W_CATEGORY = 2.2
 W_POPULARITY = 1.2
 W_BUDGET = 0.5
+# Exploration: only applied on turns that added no information, so a target
+# surfaced early (and not yet scoreable, as in intent override) is never
+# rotated away while the conversation is still productive.
+W_SEEN_PENALTY = 0.35
+MAX_STALL_PRESSURE = 3
 
 
 @dataclass
@@ -98,6 +103,7 @@ def rank(index: CatalogIndex, state: SessionState, top_k: int) -> list[Scored]:
     if not pool:
         return []
 
+    stall = min(state.stalled_turns, MAX_STALL_PRESSURE)
     documents = index.documents(list(pool))
     best_bm25 = max(pool.values()) or 1.0
     total_mass = sum(weight * index.idf(term) for term, weight in weights.items()) or 1.0
@@ -129,6 +135,7 @@ def rank(index: CatalogIndex, state: SessionState, top_k: int) -> list[Scored]:
             "category": W_CATEGORY * category_score,
             "popularity": W_POPULARITY * _popularity(document),
             "budget": W_BUDGET * _budget_fit(document, state.budget),
+            "seen": -stall * W_SEEN_PENALTY * min(state.recommended.get(document.parent_asin, 0), 3),
         }
         scored.append(Scored(document, sum(parts.values()), parts))
 
