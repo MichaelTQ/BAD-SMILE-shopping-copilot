@@ -33,20 +33,22 @@ MAX_ASKS = 2
 
 
 def next_attribute(state: SessionState) -> str:
-    """Pick the next legal attribute to ask about."""
+    """Pick the next legal attribute to ask about.
+
+    Priority: a fresh attribute the customer has neither answered nor declined;
+    then one that was productive before and may still have more to give. An
+    attribute the customer declined is never asked again.
+    """
     for attribute in ASK_ORDER:
-        if attribute in state.no_preference:
+        if attribute in state.no_preference or attribute in state.answered:
             continue
-        asks = state.asked.get(attribute, 0)
-        if asks == 0:
+        if state.asked.get(attribute, 0) == 0:
             return attribute
-        if asks < MAX_ASKS and attribute in state.answered:
-            # Productive last time and the customer may still have more to say.
-            continue
     for attribute in ASK_ORDER:
         if attribute in state.no_preference:
             continue
-        if state.asked.get(attribute, 0) < MAX_ASKS and attribute in state.answered:
+        if 0 < state.asked.get(attribute, 0) < MAX_ASKS and attribute in state.answered:
+            # Productive last time; the customer may still have more to say.
             return attribute
     # Everything is exhausted; "other" stays legal and harmless.
     return "other"

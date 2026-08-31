@@ -7,7 +7,9 @@ Nothing here touches the network. The index is built once per process from
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
+import threading
 from collections import Counter
 from dataclasses import dataclass
 from functools import lru_cache
@@ -15,12 +17,27 @@ from pathlib import Path
 
 from .text import idf, normalize, tokens
 
+# Popularity is normalised by a catalog percentile rather than a hard-coded
+# ceiling, so the scale adapts if the catalog changes. The 99th percentile wins
+# empirically: target products are themselves very popular (median
+# rating_number 7078 against a catalog median of 12), so a lower cut-off
+# compresses exactly the region where targets have to be told apart.
+POPULARITY_PERCENTILE = 0.99
+
+# Per-document token caches are bounded: the private run is 800 sessions and an
+# unbounded cache would grow the resident set past a typical memory limit.
+TOKEN_CACHE_SIZE = 8192
+
 # FTS5 bm25 column weights: parent_asin is unindexed, title matters most.
 BM25_WEIGHTS = (0.0, 6.0, 4.0, 2.5, 2.5, 1.5, 1.0)
 
-# Category tokens true of every row in this catalog, so they carry no
-# discriminative signal and are dropped before category matching.
-GENERIC_CATEGORY_TOKENS = frozenset({"clothing", "shoes", "jewelry"})
+# The first category element is the catalog-wide root ("Clothing, Shoes &
+# Jewelry" for 49990 of 50000 rows) and carries no discriminative signal, so it
+# is dropped before category matching. Only the first element is removed:
+# "Clothing", "Shoes" and "Jewelry" also appear as genuine deeper levels
+# (20523 / 11810 / 5127 times), where they are the main division of the
+# catalog. Filtering those tokens globally halved category_score for 23.9% of
+# products.
 
 
 @dataclass(frozen=True)
@@ -50,8 +67,13 @@ class CatalogIndex:
     def __init__(self, catalog_path: str | Path = "data/catalog.jsonl") -> None:
         self.catalog_path = Path(catalog_path)
         self.connection = sqlite3.connect(":memory:", check_same_thread=False)
+        # One shared in-memory connection; serialise access in case the harness
+        # drives sessions from more than one thread.
+        self._lock = threading.Lock()
         self.document_frequency: Counter[str] = Counter()
         self.total_documents = 0
+        #: log1p of a high rating_number percentile; the popularity denominator.
+        self.popularity_scale = 1.0
         self._build()
 
     # ------------------------------------------------------------------ build
@@ -70,6 +92,7 @@ class CatalogIndex:
         )
         fts_batch: list[tuple] = []
         meta_batch: list[tuple] = []
+        rating_counts: list[int] = []
         rowid = 0
         with self.catalog_path.open(encoding="utf-8") as handle:
             for line in handle:
@@ -78,7 +101,11 @@ class CatalogIndex:
                 product = json.loads(line)
                 rowid += 1
                 title = normalize(product.get("title"))
-                categories = normalize(product.get("categories"))
+                raw_categories = product.get("categories") or []
+                categories = normalize(raw_categories)
+                deep_categories = normalize(
+                    raw_categories[1:] if len(raw_categories) > 1 else raw_categories
+                )
                 features = normalize(product.get("features"))
                 details = normalize(product.get("details"))
                 store = normalize(product.get("store"))
@@ -89,17 +116,27 @@ class CatalogIndex:
                      features, details, store, description)
                 )
                 meta_batch.append(
-                    (rowid, str(product["parent_asin"]), title, categories, body,
+                    (rowid, str(product["parent_asin"]), title, deep_categories, body,
                      _price(product.get("price")),
                      float(product.get("average_rating") or 0.0),
                      int(product.get("rating_number") or 0))
                 )
+                rating_counts.append(int(product.get("rating_number") or 0))
                 self.document_frequency.update(set(tokens(body)))
                 self.total_documents += 1
                 if len(fts_batch) >= 2000:
                     self._flush(cursor, fts_batch, meta_batch)
         self._flush(cursor, fts_batch, meta_batch)
         self.connection.commit()
+        self.popularity_scale = self._percentile_scale(rating_counts)
+
+    @staticmethod
+    def _percentile_scale(rating_counts: list[int]) -> float:
+        if not rating_counts:
+            return 1.0
+        rating_counts.sort()
+        index = max(int(len(rating_counts) * POPULARITY_PERCENTILE) - 1, 0)
+        return max(math.log1p(rating_counts[index]), 1e-9)
 
     @staticmethod
     def _flush(cursor: sqlite3.Cursor, fts_batch: list, meta_batch: list) -> None:
@@ -131,32 +168,34 @@ class CatalogIndex:
         if not unique:
             return []
         expression = " OR ".join(f'"{term}"' for term in unique[:60])
-        rows = self.connection.execute(
-            "SELECT rowid, bm25(products, ?, ?, ?, ?, ?, ?, ?) AS score FROM products "
-            "WHERE products MATCH ? ORDER BY score LIMIT ?",
-            (*BM25_WEIGHTS, expression, limit),
-        ).fetchall()
+        with self._lock:
+            rows = self.connection.execute(
+                "SELECT rowid, bm25(products, ?, ?, ?, ?, ?, ?, ?) AS score FROM products "
+                "WHERE products MATCH ? ORDER BY score LIMIT ?",
+                (*BM25_WEIGHTS, expression, limit),
+            ).fetchall()
         return [(int(row[0]), -float(row[1])) for row in rows]
 
     def documents(self, rowids: list[int]) -> dict[int, Document]:
         if not rowids:
             return {}
         placeholders = ",".join("?" * len(rowids))
-        rows = self.connection.execute(
-            f"SELECT rowid, parent_asin, title, category_text, body, price, "
-            f"average_rating, rating_number FROM meta WHERE rowid IN ({placeholders})",
-            rowids,
-        ).fetchall()
+        with self._lock:
+            rows = self.connection.execute(
+                f"SELECT rowid, parent_asin, title, category_text, body, price, "
+                f"average_rating, rating_number FROM meta WHERE rowid IN ({placeholders})",
+                rowids,
+            ).fetchall()
         return {int(row[0]): Document(int(row[0]), *row[1:]) for row in rows}
 
-    @lru_cache(maxsize=40000)
+    @lru_cache(maxsize=TOKEN_CACHE_SIZE)
     def _token_set(self, body: str) -> frozenset[str]:
         return frozenset(tokens(body))
 
     def token_set(self, document: Document) -> frozenset[str]:
         return self._token_set(document.body)
 
-    @lru_cache(maxsize=40000)
+    @lru_cache(maxsize=TOKEN_CACHE_SIZE)
     def _token_text(self, body: str) -> str:
         return " ".join(tokens(body))
 
@@ -165,5 +204,4 @@ class CatalogIndex:
         return self._token_text(document.body)
 
     def category_tokens(self, document: Document) -> frozenset[str]:
-        found = frozenset(tokens(document.category_text)) - GENERIC_CATEGORY_TOKENS
-        return found
+        return frozenset(tokens(document.category_text))

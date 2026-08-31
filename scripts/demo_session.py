@@ -1,7 +1,12 @@
 """Offline demo: print one full multi-turn session, turn by turn.
 
-Runs the same simulated customer the local evaluator uses, but prints the
-agent's internal state so the dialogue can be inspected by hand.
+DEVELOPMENT TOOL ONLY — NOT PART OF THE SCORED PATH.
+
+This script deliberately reads the local evaluator's hidden intent card and the
+public ground truth so a developer can check the dialogue by hand. The Agent
+itself never sees any of it: `starter/agent.py` and `src/` import neither the
+evaluator nor `data/public_set.jsonl` (enforced by a unit test). Nothing here
+is imported by the agent at run time.
 
     python3 -m scripts.demo_session --sample-id public_0002
 """

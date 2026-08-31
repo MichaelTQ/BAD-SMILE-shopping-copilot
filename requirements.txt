@@ -1,6 +1,14 @@
 # Runtime dependencies
-# The baseline agent uses only the Python standard library.
-# Add project dependencies here as the agent evolves.
-# The submitted agent still uses only the Python standard library:
-# no LLM, no API client, no network access. SQLite must include FTS5
-# (default in CPython 3.10+). See METHOD.md.
+# The submitted agent uses only the Python standard library: no LLM, no API
+# client, no network access, no third-party packages.
+#
+# Requirements:
+#   - Python 3.10 or later
+#   - SQLite compiled with FTS5 (the default in CPython 3.10+)
+#
+# Optional environment variable:
+#   TECHJAM_CATALOG  absolute path to catalog.jsonl. Unset by default; the
+#                    agent then looks next to the repository root, then in the
+#                    current working directory.
+#
+# See METHOD.md for architecture, results, cost and limitations.

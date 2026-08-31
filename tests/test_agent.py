@@ -7,6 +7,7 @@ on the 50k-row release file.
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -16,7 +17,7 @@ from src.parsing import Constraint, classify, parse_turn
 from src.policy import ASK_ORDER, QUESTIONS, next_attribute
 from src.ranker import build_query, rank
 from src.state import SessionState
-from starter.agent import Agent
+from starter.agent import Agent, resolve_catalog_path
 
 ALLOWED_ATTRIBUTES = {
     "category", "material", "color", "size", "style", "brand",
@@ -83,6 +84,18 @@ class ParsingTest(unittest.TestCase):
         parsed = parse_turn("Those options are not quite right yet. Ask me about one specific attribute.")
         self.assertEqual(parsed.constraints, [])
         self.assertTrue(parsed.nudge)
+
+    def test_vocabulary_matches_whole_words_not_substrings(self) -> None:
+        # "fit" must not fire inside "outfit"/"benefit", "xs" not inside "boxset".
+        for value in ("a complete outfit", "the main benefit here",
+                      "boxset of six", "surplus stock"):
+            self.assertEqual(classify(value), "feature", msg=value)
+        # Genuine whole-word hits still classify.
+        self.assertEqual(classify("relaxed fit"), "style")
+        self.assertEqual(classify("plus sizing"), "size")
+        # Multi-word and hyphenated entries still match.
+        self.assertEqual(classify("runs fit true to size"), "size")
+        self.assertEqual(classify("a v-neck cut"), "style")
 
     def test_classification_covers_every_allowed_attribute_it_emits(self) -> None:
         cases = {
@@ -177,6 +190,15 @@ class PolicyTest(unittest.TestCase):
             state.record_response("m", attribute, [])
             state.answered.add(attribute)
 
+    def test_answered_attributes_are_not_asked_again_while_fresh_ones_remain(self) -> None:
+        state = SessionState(session_id="s1")
+        state.answered = {"material", "color"}
+        for _ in range(4):
+            attribute = next_attribute(state)
+            self.assertNotIn(attribute, {"material", "color"})
+            state.record_response("m", attribute, [])
+            state.answered.add(attribute)
+
     def test_productive_attribute_is_not_repeated_before_new_ones(self) -> None:
         state = SessionState(session_id="s1")
         first = next_attribute(state)
@@ -241,9 +263,12 @@ class ContractTest(unittest.TestCase):
     def tearDownClass(cls) -> None:
         cls._directory.cleanup()
 
-    def test_respond_before_reset_raises(self) -> None:
-        with self.assertRaises(RuntimeError):
-            Agent(self.catalog).respond("missing", "hello", 1, 10)
+    def test_respond_without_reset_still_returns_a_valid_payload(self) -> None:
+        # An exception here would be scored as a miss for the whole session.
+        response = Agent(self.catalog).respond("missing", "leather boot", 1, 10)
+        self.assertIsInstance(response["message"], str)
+        self.assertIn(response["ask_attribute"], ALLOWED_ATTRIBUTES)
+        self.assertTrue(response["recommendations"])
 
     def test_response_shape_matches_the_contract_every_turn(self) -> None:
         agent = Agent(self.catalog)
@@ -301,6 +326,84 @@ class ContractTest(unittest.TestCase):
         agent.reset("s", {})
         self.assertEqual(agent.sessions["s"].constraints, [])
         self.assertEqual(agent.sessions["s"].asked, {})
+
+
+class DeploymentTest(unittest.TestCase):
+    """Guards for the way the official harness may load and run the agent."""
+
+    def test_catalog_is_found_from_an_unrelated_working_directory(self) -> None:
+        original = Path.cwd()
+        with tempfile.TemporaryDirectory() as elsewhere:
+            os.chdir(elsewhere)
+            try:
+                self.assertTrue(resolve_catalog_path().is_file())
+            finally:
+                os.chdir(original)
+
+    def test_explicit_path_and_env_override_are_honoured(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            catalog = write_catalog(Path(directory))
+            self.assertEqual(resolve_catalog_path(catalog), catalog)
+            os.environ["CATALOG_ENV_FOR_TEST"] = str(catalog)
+            try:
+                import starter.agent as agent_module
+
+                previous = agent_module.CATALOG_ENV_VAR
+                agent_module.CATALOG_ENV_VAR = "CATALOG_ENV_FOR_TEST"
+                try:
+                    self.assertEqual(resolve_catalog_path(), catalog)
+                finally:
+                    agent_module.CATALOG_ENV_VAR = previous
+            finally:
+                del os.environ["CATALOG_ENV_FOR_TEST"]
+
+    def test_explicitly_requested_but_missing_catalog_fails_loudly(self) -> None:
+        # Silently ranking against a different catalog would be worse.
+        with self.assertRaises(FileNotFoundError) as caught:
+            resolve_catalog_path("/nonexistent/dir/catalog.jsonl")
+        self.assertIn("catalog_path argument", str(caught.exception))
+
+    def test_agent_module_never_imports_the_evaluator_or_the_labels(self) -> None:
+        # The agent must not read ground truth. Guard against accidental reuse.
+        for path in [Path("starter/agent.py"), *Path("src").glob("*.py")]:
+            text = path.read_text(encoding="utf-8")
+            self.assertNotIn("evaluator", text, msg=str(path))
+            self.assertNotIn("public_set", text, msg=str(path))
+            self.assertNotIn("ground_truth", text, msg=str(path))
+
+    def test_empty_ranking_falls_back_to_the_previous_turn(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            agent = Agent(write_catalog(Path(directory)))
+            agent.reset("s", {})
+            first = agent.respond("s", "I'm looking for Boots. A key requirement is: Leather.", 1, 10)
+            self.assertTrue(first["recommendations"])
+            # A turn with no usable tokens at all.
+            second = agent.respond("s", "!!!", 2, 10)
+            self.assertEqual(
+                [item["parent_asin"] for item in second["recommendations"]],
+                [item["parent_asin"] for item in first["recommendations"]],
+            )
+
+    def test_every_retrieval_path_failing_still_yields_a_legal_response(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            agent = Agent(write_catalog(Path(directory)))
+            agent.reset("s", {})
+
+            def boom(*_args, **_kwargs):
+                raise ValueError("retrieval exploded")
+
+            import starter.agent as agent_module
+
+            saved = (agent_module.rank, agent_module.bm25_only)
+            agent_module.rank, agent_module.bm25_only = boom, boom
+            try:
+                response = agent.respond("s", "leather boot", 1, 10)
+            finally:
+                agent_module.rank, agent_module.bm25_only = saved
+            self.assertIsInstance(response["message"], str)
+            self.assertIn(response["ask_attribute"], ALLOWED_ATTRIBUTES)
+            self.assertEqual(response["recommendations"], [])
+            self.assertEqual(response["usage"], {"prompt_tokens": 0, "completion_tokens": 0})
 
 
 if __name__ == "__main__":

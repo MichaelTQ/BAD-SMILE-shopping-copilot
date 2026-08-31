@@ -19,6 +19,13 @@ HARD_WEIGHT = 2.5
 SOFT_WEIGHT = 1.0
 VALUE_BONUS = 1.5          # extra weight for a concrete color/material/size
 OVERRIDE_DECAY = 0.6       # multiplier for constraints superseded by an override
+PHRASE_MIN_TOKENS = 3      # shortest constraint that counts as a phrase
+# How a constraint becomes phrase units. "full" requires the entire constraint
+# to appear contiguously, which gets fragile fast: 19.8% of real constraints are
+# longer than 5 tokens (up to 30), and one reordered word zeroes the feature.
+PHRASE_MODE = "full"       # "full" | "ngram" | "truncate"
+PHRASE_NGRAM = 3           # window size for "ngram"
+PHRASE_MAX_TOKENS = 5      # keep this many leading tokens for "truncate"
 
 # Rerank feature weights.
 W_BM25 = 1.0
@@ -27,6 +34,7 @@ W_PHRASE = 1.2
 W_CATEGORY = 2.2
 W_POPULARITY = 1.2
 W_BUDGET = 0.5
+
 # Exploration: only applied on turns that added no information, so a target
 # surfaced early (and not yet scoreable, as in intent override) is never
 # rotated away while the conversation is still productive.
@@ -55,15 +63,15 @@ def build_query(state: SessionState) -> tuple[dict[str, float], list[str], list[
     category_terms = query_tokens(state.category or "")
     add(state.category or "", CATEGORY_WEIGHT)
 
-    phrases: list[str] = []
+    phrases: list[list[str]] = []
     for constraint in state.constraints:
         weight = HARD_WEIGHT if constraint.hard else SOFT_WEIGHT
         if constraint.stale:
             weight *= OVERRIDE_DECAY
         add(constraint.value, weight)
-        terms = query_tokens(constraint.value)
-        if len(terms) >= 3:
-            phrases.append(" ".join(terms))
+        units = _phrase_units(query_tokens(constraint.value))
+        if units:
+            phrases.append(units)
 
     for values in attribute_values(state.constraints).values():
         for value in values:
@@ -72,9 +80,29 @@ def build_query(state: SessionState) -> tuple[dict[str, float], list[str], list[
     return weights, category_terms, phrases
 
 
-def _popularity(document: Document) -> float:
-    """Mild prior: well-reviewed, well-rated products are likelier targets."""
-    volume = math.log1p(max(document.rating_number, 0)) / math.log1p(100000.0)
+def _phrase_units(terms: list[str]) -> list[str]:
+    """Split one constraint into the phrase units matched against a product."""
+    if len(terms) < PHRASE_MIN_TOKENS:
+        return []
+    if PHRASE_MODE == "truncate":
+        return [" ".join(terms[:PHRASE_MAX_TOKENS])]
+    if PHRASE_MODE == "ngram" and len(terms) > PHRASE_NGRAM:
+        return [
+            " ".join(terms[start:start + PHRASE_NGRAM])
+            for start in range(len(terms) - PHRASE_NGRAM + 1)
+        ]
+    return [" ".join(terms)]
+
+
+def _popularity(document: Document, scale: float) -> float:
+    """Prior: well-reviewed, well-rated products are likelier targets.
+
+    ``scale`` is log1p of a high catalog percentile of rating_number. It is
+    deliberately not clipped at 1.0: 81% of target products sit above the 95th
+    percentile, so clipping there collapses most targets onto the same value as
+    every other bestseller and costs ~0.043 of the score.
+    """
+    volume = math.log1p(max(document.rating_number, 0)) / scale
     quality = max(document.average_rating, 0.0) / 5.0
     return volume * quality
 
@@ -127,13 +155,18 @@ def rank(index: CatalogIndex, state: SessionState, top_k: int) -> list[Scored]:
         phrase_score = 0.0
         if phrases:
             body = index.token_text(document)
-            phrase_score = sum(1.0 for phrase in phrases if phrase in body) / len(phrases)
+            # Each constraint contributes its own hit ratio, then constraints are
+            # averaged, so one very long constraint cannot dominate the feature.
+            phrase_score = sum(
+                sum(1.0 for unit in units if unit in body) / len(units)
+                for units in phrases
+            ) / len(phrases)
         parts = {
             "bm25": W_BM25 * (bm25 / best_bm25),
             "coverage": W_COVERAGE * coverage,
             "phrase": W_PHRASE * phrase_score,
             "category": W_CATEGORY * category_score,
-            "popularity": W_POPULARITY * _popularity(document),
+            "popularity": W_POPULARITY * _popularity(document, index.popularity_scale),
             "budget": W_BUDGET * _budget_fit(document, state.budget),
             "seen": -stall * W_SEEN_PENALTY * min(state.recommended.get(document.parent_asin, 0), 3),
         }

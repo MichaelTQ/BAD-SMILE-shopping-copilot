@@ -10,7 +10,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
-from .text import query_tokens
+from .text import TOKEN_RE, query_tokens
 
 # Attributes the contract allows in ``ask_attribute``.
 ATTRIBUTES = (
@@ -110,22 +110,39 @@ class ParsedTurn:
     budget: float | None = None
 
 
+def _vocabulary_hit(words: set[str], lowered: str, vocabulary: tuple[str, ...]) -> bool:
+    """Whole-word vocabulary match.
+
+    Substring matching would fire on "fit" inside "outfit"/"benefit" and on
+    "xs" inside "boxset", so single-word entries are matched against the token
+    set. Multi-word and hyphenated entries ("fit true", "v-neck") are long
+    enough to stay safe as substrings.
+    """
+    for term in vocabulary:
+        if term in words:
+            return True
+        if (" " in term or "-" in term) and term in lowered:
+            return True
+    return False
+
+
 def classify(value: str) -> str:
     """Map a free-text constraint onto one allowed attribute."""
     lowered = value.lower()
-    if BUDGET_RE.search(lowered) or "budget" in lowered or "price" in lowered:
+    words = set(TOKEN_RE.findall(lowered))
+    if BUDGET_RE.search(lowered) or "budget" in words or "price" in words:
         return "budget"
     if MATERIAL_RE.search(lowered):
         return "material"
-    if COLOR_RE.search(lowered) or "color" in lowered or "colour" in lowered:
+    if COLOR_RE.search(lowered) or "color" in words or "colour" in words:
         return "color"
-    if any(word in lowered for word in SIZE_WORDS):
+    if _vocabulary_hit(words, lowered, SIZE_WORDS):
         return "size"
-    if any(word in lowered for word in STYLE_WORDS):
+    if _vocabulary_hit(words, lowered, STYLE_WORDS):
         return "style"
-    if any(word in lowered for word in USE_CASE_WORDS):
+    if _vocabulary_hit(words, lowered, USE_CASE_WORDS):
         return "use_case"
-    if "brand" in lowered or "made by" in lowered:
+    if "brand" in words or "made by" in lowered:
         return "brand"
     return "feature"
 

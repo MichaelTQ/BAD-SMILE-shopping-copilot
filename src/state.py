@@ -35,6 +35,8 @@ class SessionState:
 
     # parent_asin -> number of turns it has been recommended in.
     recommended: dict[str, int] = field(default_factory=dict)
+    # Last ranking returned, reused when a turn produces nothing at all.
+    last_recommendations: list[str] = field(default_factory=list)
 
     turns: int = 0
     overrides: int = 0
@@ -122,6 +124,8 @@ class SessionState:
             self.asked[ask_attribute] = self.asked.get(ask_attribute, 0) + 1
         for asin in asins:
             self.recommended[asin] = self.recommended.get(asin, 0) + 1
+        if asins:
+            self.last_recommendations = list(asins)
 
     # --------------------------------------------------------------- reading
 
