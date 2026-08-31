@@ -33,7 +33,9 @@ _REPO_ROOT = _find_package_root(Path(__file__).resolve())
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+from src.explain import explain
 from src.index import CatalogIndex
+from src.llm import LocalLLM
 from src.parsing import parse_turn
 from src.policy import next_attribute, question_for
 from src.ranker import bm25_only, rank
@@ -84,6 +86,9 @@ class Agent:
         self.catalog_path = resolve_catalog_path(catalog_path)
         self.index = CatalogIndex(self.catalog_path)
         self.sessions: dict[str, SessionState] = {}
+        # Opt-in and absent by default: without TECHJAM_LLM_ENDPOINT this is
+        # inert and the agent is exactly the offline rule-based system.
+        self.llm = LocalLLM()
 
     # ---------------------------------------------------------- official API
 
@@ -101,8 +106,11 @@ class Agent:
             self.reset(session_id, {})
             state = self.sessions[session_id]
 
+        rationale = ""
         try:
-            recommendations = self._recommend(state, user_message, top_k)
+            scored = self._rank(state, user_message, top_k)
+            recommendations = _as_payload(scored, top_k)
+            rationale = explain(self.index, state, scored)
         except Exception:
             recommendations = self._fallback(state, user_message, top_k)
 
@@ -112,7 +120,8 @@ class Agent:
         except Exception:
             attribute, question = "other", question_for("other")
 
-        message = f"{RESULT_MESSAGE if recommendations else NO_RESULT_MESSAGE} {question}"
+        opening = RESULT_MESSAGE if recommendations else NO_RESULT_MESSAGE
+        message = " ".join(part for part in (opening, rationale, question) if part)
         try:
             state.record_response(
                 message, attribute, [item["parent_asin"] for item in recommendations]
@@ -129,12 +138,26 @@ class Agent:
 
     # -------------------------------------------------------------- internals
 
-    def _recommend(self, state: SessionState, user_message: str, top_k: int) -> list[dict]:
-        state.record_turn(user_message, parse_turn(user_message))
+    def _understand(self, user_message: str):
+        """Rules first; consult the LLM only when they find no category at all.
+
+        The rules beat the LLM on every phrasing they cover, so calling the model
+        unconditionally would lower accuracy as well as add latency. This keeps
+        the call rate at exactly the rule-failure rate.
+        """
+        parsed = parse_turn(user_message)
+        if parsed.category is None and self.llm.available:
+            category = self.llm.extract_category(user_message)
+            if category:
+                parsed.category = category
+        return parsed
+
+    def _rank(self, state: SessionState, user_message: str, top_k: int) -> list:
+        state.record_turn(user_message, self._understand(user_message))
         scored = rank(self.index, state, top_k)
         if not scored:
-            return self._fallback(state, user_message, top_k)
-        return _as_payload(scored, top_k)
+            scored = bm25_only(self.index, user_message, top_k)
+        return scored
 
     def _fallback(self, state: SessionState, user_message: str, top_k: int) -> list[dict]:
         """Plain BM25 on the raw message; then the previous turn's list."""

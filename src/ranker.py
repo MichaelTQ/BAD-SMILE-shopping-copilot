@@ -12,6 +12,22 @@ from .text import query_tokens
 
 RECALL_POOL = 200          # candidates pulled from BM25 before reranking
 CATEGORY_POOL = 100        # extra recall from a category-only query
+# A third route: every category term must appear. The resulting pool is small
+# and precise, which surfaces products whose title omits the category keywords
+# and are therefore buried in the OR routes.
+STRICT_CATEGORY_POOL = 800      # cap on the strict-category route
+# When the strict pool comes back below the cap the category is narrow enough to
+# take whole; when it saturates the cap the category is broad and only its head
+# is worth adding, otherwise the extra candidates dilute the ranking.
+STRICT_CATEGORY_HEAD = 200
+# Widening recall dilutes the ranking, so only pay that cost once the dialogue
+# has stopped producing information — i.e. when the current Top 10 is evidently
+# wrong and there is nothing left to lose.
+STRICT_ON_STALL_ONLY = True
+# The primary query is fetched deeper than the pool so that candidates recalled
+# by a secondary route can be given their real BM25 score. FTS5 has to rank every
+# match anyway, so a larger LIMIT is nearly free (200 -> 3000 costs ~4 ms).
+SCORE_LOOKUP_POOL = 3000
 
 # Query-side term weights.
 CATEGORY_WEIGHT = 2.5
@@ -38,6 +54,14 @@ W_BUDGET = 0.5
 # Exploration: only applied on turns that added no information, so a target
 # surfaced early (and not yet scoreable, as in intent override) is never
 # rotated away while the conversation is still productive.
+# The anonymized profile's preference_tags, as a rerank tie-breaker. Disabled:
+# the tags do correlate with the target (1.92x lift against a random product),
+# but that correlation is almost entirely explained by the candidate pool. Lift
+# decays to 1.81x against the pool and 1.17x within the Top 10 — i.e. it carries
+# no signal exactly where ranking is decided. Any positive weight measured
+# monotonically worse; a negative weight looked better on the full set but
+# reversed sign under split-half validation.
+W_PROFILE = 0.0
 W_SEEN_PENALTY = 0.5
 MAX_STALL_PRESSURE = 3
 
@@ -124,14 +148,35 @@ def rank(index: CatalogIndex, state: SessionState, top_k: int) -> list[Scored]:
         return []
 
     ordered = sorted(weights, key=lambda term: -weights[term] * index.idf(term))
-    pool = dict(index.search(ordered, RECALL_POOL))
+    ranked = index.search(ordered, max(RECALL_POOL, SCORE_LOOKUP_POOL))
+    lookup = dict(ranked)
+    pool = dict(ranked[:RECALL_POOL])
     if category_terms:
-        for rowid, _ in index.search(category_terms, CATEGORY_POOL):
-            pool.setdefault(rowid, 0.0)
+        extra = [rowid for rowid, _ in index.search(category_terms, CATEGORY_POOL)]
+        if (
+            STRICT_CATEGORY_POOL
+            and len(category_terms) > 1
+            and (state.stalled_turns > 0 or not STRICT_ON_STALL_ONLY)
+        ):
+            strict = index.search_all(category_terms, STRICT_CATEGORY_POOL)
+            if len(strict) >= STRICT_CATEGORY_POOL:
+                strict = strict[:STRICT_CATEGORY_HEAD]
+            extra.extend(rowid for rowid, _ in strict)
+        # Give secondary-route candidates their real BM25 score. Defaulting them
+        # to 0.0 would apply a full W_BM25 penalty for a measurement that was
+        # never taken, which no other feature can offset.
+        for rowid in extra:
+            pool.setdefault(rowid, lookup.get(rowid, 0.0))
     if not pool:
         return []
 
     stall = min(state.stalled_turns, MAX_STALL_PRESSURE)
+    raw_tags = state.user_profile.get("preference_tags")
+    profile_tags = [
+        term
+        for tag in (raw_tags if isinstance(raw_tags, list) else ())
+        for term in query_tokens(str(tag))
+    ]
     documents = index.documents(list(pool))
     best_bm25 = max(pool.values()) or 1.0
     total_mass = sum(weight * index.idf(term) for term, weight in weights.items()) or 1.0
@@ -168,6 +213,10 @@ def rank(index: CatalogIndex, state: SessionState, top_k: int) -> list[Scored]:
             "category": W_CATEGORY * category_score,
             "popularity": W_POPULARITY * _popularity(document, index.popularity_scale),
             "budget": W_BUDGET * _budget_fit(document, state.budget),
+            "profile": W_PROFILE * (
+                sum(1 for term in profile_tags if term in doc_tokens) / len(profile_tags)
+                if profile_tags else 0.0
+            ),
             "seen": -stall * W_SEEN_PENALTY * min(state.recommended.get(document.parent_asin, 0), 3),
         }
         scored.append(Scored(document, sum(parts.values()), parts))

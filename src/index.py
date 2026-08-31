@@ -45,6 +45,8 @@ class Document:
     rowid: int
     parent_asin: str
     title: str
+    #: Title with original casing, for customer-facing text only.
+    display_title: str
     category_text: str
     body: str
     price: float | None
@@ -87,8 +89,9 @@ class CatalogIndex:
         )
         cursor.execute(
             "CREATE TABLE meta ("
-            "rowid INTEGER PRIMARY KEY, parent_asin TEXT, title TEXT, category_text TEXT, "
-            "body TEXT, price REAL, average_rating REAL, rating_number INTEGER)"
+            "rowid INTEGER PRIMARY KEY, parent_asin TEXT, title TEXT, display_title TEXT, "
+            "category_text TEXT, body TEXT, price REAL, average_rating REAL, "
+            "rating_number INTEGER)"
         )
         fts_batch: list[tuple] = []
         meta_batch: list[tuple] = []
@@ -116,7 +119,8 @@ class CatalogIndex:
                      features, details, store, description)
                 )
                 meta_batch.append(
-                    (rowid, str(product["parent_asin"]), title, deep_categories, body,
+                    (rowid, str(product["parent_asin"]), title,
+                     str(product.get("title") or ""), deep_categories, body,
                      _price(product.get("price")),
                      float(product.get("average_rating") or 0.0),
                      int(product.get("rating_number") or 0))
@@ -148,7 +152,7 @@ class CatalogIndex:
             fts_batch,
         )
         cursor.executemany(
-            "INSERT INTO meta VALUES (?, ?, ?, ?, ?, ?, ?, ?)", meta_batch
+            "INSERT INTO meta VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", meta_batch
         )
         fts_batch.clear()
         meta_batch.clear()
@@ -176,14 +180,29 @@ class CatalogIndex:
             ).fetchall()
         return [(int(row[0]), -float(row[1])) for row in rows]
 
+    def search_all(self, terms: list[str], limit: int) -> list[tuple[int, float]]:
+        """BM25 recall requiring *every* term (AND), for a high-precision pool."""
+        unique = list(dict.fromkeys(term for term in terms if term))
+        if not unique:
+            return []
+        expression = " AND ".join(f'"{term}"' for term in unique[:12])
+        with self._lock:
+            rows = self.connection.execute(
+                "SELECT rowid, bm25(products, ?, ?, ?, ?, ?, ?, ?) AS score FROM products "
+                "WHERE products MATCH ? ORDER BY score LIMIT ?",
+                (*BM25_WEIGHTS, expression, limit),
+            ).fetchall()
+        return [(int(row[0]), -float(row[1])) for row in rows]
+
     def documents(self, rowids: list[int]) -> dict[int, Document]:
         if not rowids:
             return {}
         placeholders = ",".join("?" * len(rowids))
         with self._lock:
             rows = self.connection.execute(
-                f"SELECT rowid, parent_asin, title, category_text, body, price, "
-                f"average_rating, rating_number FROM meta WHERE rowid IN ({placeholders})",
+                f"SELECT rowid, parent_asin, title, display_title, category_text, body, "
+                f"price, average_rating, rating_number FROM meta "
+                f"WHERE rowid IN ({placeholders})",
                 rowids,
             ).fetchall()
         return {int(row[0]): Document(int(row[0]), *row[1:]) for row in rows}

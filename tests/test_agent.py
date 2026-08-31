@@ -15,7 +15,9 @@ from pathlib import Path
 from src.index import CatalogIndex
 from src.parsing import Constraint, classify, parse_turn
 from src.policy import ASK_ORDER, QUESTIONS, next_attribute
+from src.explain import explain, matched_constraints
 from src.ranker import build_query, rank
+from src.text import query_tokens
 from src.state import SessionState
 from starter.agent import Agent, resolve_catalog_path
 
@@ -348,6 +350,47 @@ class ContractTest(unittest.TestCase):
         agent.reset("s", {})
         self.assertEqual(agent.sessions["s"].constraints, [])
         self.assertEqual(agent.sessions["s"].asked, {})
+
+
+class ExplanationTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls._directory = tempfile.TemporaryDirectory()
+        cls.index = CatalogIndex(write_catalog(Path(cls._directory.name)))
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls._directory.cleanup()
+
+    def _state(self, *messages: str) -> SessionState:
+        state = SessionState(session_id="s1")
+        for message in messages:
+            state.record_turn(message, parse_turn(message))
+        return state
+
+    def test_explanation_names_the_constraints_it_actually_matched(self) -> None:
+        state = self._state("I'm looking for Boots.", "What matters is: leather.")
+        text = explain(self.index, state, rank(self.index, state, 10))
+        self.assertIn("leather", text.lower())
+        self.assertIn("Black leather hiking boot", text)
+
+    def test_explanation_never_claims_an_unmatched_constraint(self) -> None:
+        state = self._state("I'm looking for Boots.", "What matters is: cashmere.")
+        scored = rank(self.index, state, 10)
+        for item in scored:
+            matched = matched_constraints(self.index, state, item.document)
+            words = self.index.token_set(item.document)
+            for value in matched:
+                self.assertTrue(all(t in words for t in query_tokens(value)))
+
+    def test_empty_ranking_explains_nothing(self) -> None:
+        self.assertEqual(explain(self.index, SessionState(session_id="s"), []), "")
+
+    def test_explanation_is_a_single_plain_sentence(self) -> None:
+        state = self._state("I'm looking for Boots.", "What matters is: leather.")
+        text = explain(self.index, state, rank(self.index, state, 10))
+        self.assertTrue(text.endswith("."))
+        self.assertNotIn("\n", text)
 
 
 class DeploymentTest(unittest.TestCase):

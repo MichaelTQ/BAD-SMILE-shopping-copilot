@@ -11,8 +11,8 @@ Retrieval is two-stage: SQLite **FTS5 BM25** recall over the 50k-row catalog,
 followed by a local constraint-aware rerank. The query is built from the whole
 accumulated dialogue rather than only the current message.
 
-On the 200 public sessions: **Hit Rate@10 0.990, MRR 0.763026, MTTC 1.875,
-TechnicalScore 0.906408**, against the `0.10671` BM25 baseline.
+On the 200 public sessions: **Hit Rate@10 0.995, MRR 0.764323, MTTC 1.850,
+TechnicalScore 0.909797**, against the `0.10671` BM25 baseline.
 
 ## Architecture
 
@@ -24,8 +24,9 @@ src/state.py         SessionState: one per session_id
 src/policy.py        which attribute to ask next + fixed question templates
 src/index.py         FTS5 index + metadata table + document frequencies
 src/ranker.py        BM25 recall (Top 200) -> local rerank -> Top 10
+src/explain.py       customer-facing rationale for the top result
 scripts/demo_session.py   development tool: prints one full session
-tests/test_agent.py       36 unit tests (plus the 3 shipped evaluator tests)
+tests/test_agent.py       43 unit tests (plus the 3 shipped evaluator tests)
 ```
 
 The evaluator, public data and ground truth are untouched. `starter/agent.py`
@@ -67,14 +68,33 @@ measured distinctly worse (override hit rate 0.767 vs 1.000).
 Query weights come from the cumulative state: category 3.0, hard constraint
 2.5, soft 1.0, stale x0.6, concrete color/material/size +1.5.
 
-1. **Recall** — FTS5 `MATCH` over an OR of top-weighted terms ordered by
-   `bm25()` with the starter's column weights, `LIMIT 200`, plus a
-   category-only query (`LIMIT 100`).
+1. **Recall** — three routes merged into one pool:
+   - the primary query, an OR of top-weighted terms ranked by `bm25()` with the
+     starter's column weights, `LIMIT 200`;
+   - a category-only OR query, `LIMIT 100`;
+   - a strict route requiring **every** category term (AND), used **only on
+     turns that added no information**. Widening recall dilutes ranking, so it
+     is paid for only once the dialogue has stalled and the current Top 10 is
+     evidently wrong. A narrow category is taken whole; a broad one contributes
+     only its head.
+
+   Candidates from the secondary routes are given their **real** BM25 score on
+   the primary query. Leaving them at 0.0 applies a full `W_BM25` penalty for a
+   measurement that was never taken — with Top-10 score spread of only 0.183,
+   that alone kept correctly-recalled targets out of the Top 10. The primary
+   query is therefore fetched to depth 3000 to serve as a score lookup; FTS5
+   ranks every match anyway, so the deeper limit costs ~4 ms.
 2. **Rerank** — linear score over `bm25` (1.0), IDF `coverage` (3.0),
    `phrase` containment (1.2), `category` overlap (2.2), `popularity` (1.2),
    `budget` fit (0.5), and a `seen` penalty applied **only on turns that added
    no information**.
 3. Top 10, sorted deterministically by (score, `parent_asin`).
+
+`message` then carries a short rationale for the top result built by
+`src/explain.py` — which stated constraints it literally contains, its price
+against any stated budget, and its rating volume. The evaluator only
+type-checks `message`, so this costs no score; it exists because `message` is
+the only human-facing output.
 
 **Popularity** is `log1p(rating_number) / log1p(Q₀.₉₉) × average_rating/5`,
 where `Q₀.₉₉` is computed from the catalog at build time so the scale adapts if
@@ -148,7 +168,36 @@ head-room the current design has.
 | Reduce `category` weight | ±0.0001 across 0.5–3.5. It is a filter, not a ranker. |
 | Weights ramping with constraint count | Full set +0.0006, but split-half gave **−0.0019 / +0.0032** — opposite signs, i.e. noise. Removed. |
 | Drop `budget` (99.8% zero) | Exactly 0.0 change; kept, since its lift is 3.24x when it does fire. |
+| Personalize with `user_profile.preference_tags` | Harmful either way: see below. |
 | Relax phrase matching from whole-constraint to 3-grams | No score change, and the feature gets **worse**: see below. |
+
+### Profile personalization: a correlation that vanishes inside the pool
+
+`preference_tags` (`"fit"`, `"comfort"`, `"material"`, …) correlate with the
+target: they appear in the target's text 32.6% of the time against 17.0% for a
+random product, a 1.92x lift. Two ways of using that were measured, and both hurt:
+
+| use | result |
+| --- | --- |
+| Added to the query at weight 0.15 / 0.4 / 0.8 / 1.5 | 0.8983 / 0.8956 / 0.8921 / 0.8854 — **monotonically worse** |
+| As a rerank feature at weight 0.1 / 0.3 / 0.6 / 1.2 | 0.8994 / 0.9001 / 0.8923 / 0.8729 — also worse |
+| As a rerank feature at weight −0.3 | 0.9075 on the full set, but split-half gave **+0.0039 / −0.0018** — opposite signs, noise |
+
+The reason is that the 1.92x lift is measured **against a random product**, and
+almost all of it is explained by the candidate pool rather than by the customer:
+
+```text
+target hit rate                0.334
+vs. random product             lift 1.92x
+vs. the whole candidate pool   lift 1.81x
+vs. the pool's Top 10          lift 1.17x
+```
+
+By the time candidates share a category and the stated constraints, tags carry
+almost no additional signal — and they are generic, low-IDF words, so giving
+them query weight dilutes the terms that do discriminate. This is a plain
+conditional-independence trap: correlated marginally, near-independent given
+the pool. `W_PROFILE` is kept in `src/ranker.py` at 0.0 with this rationale.
 
 ### Phrase matching: why whole-constraint beats n-grams here
 
@@ -173,7 +222,7 @@ measured (`PHRASE_MODE`, still switchable in `src/ranker.py`):
 | `ngram` — hit ratio over sliding 3-grams | 0.9064 |
 | `truncate` — keep the first 5 tokens | 0.9064 |
 
-Scores are identical because MTTC is 1.875: most sessions convert on turn 1-2,
+Scores are identical because MTTC is below 2: most sessions convert on turn 1-2,
 when only ~0.56 constraints exist and `phrase` has not activated at all. So the
 comparison was repeated on the feature itself, at turn 4 where it does fire:
 
@@ -213,21 +262,21 @@ sparse features were revised accordingly.
 
 | metric | BM25 baseline | this agent |
 | --- | --- | --- |
-| Hit Rate@10 | 0.125 | **0.990** |
-| MRR | 0.068034 | **0.763026** |
-| MTTC | 9.81 | **1.875** |
-| Efficiency | 0.119 | **0.9125** |
-| **TechnicalScore** | 0.10671 | **0.906408** |
+| Hit Rate@10 | 0.125 | **0.995** |
+| MRR | 0.068034 | **0.764323** |
+| MTTC | 9.81 | **1.850** |
+| Efficiency | 0.119 | **0.915** |
+| **TechnicalScore** | 0.10671 | **0.909797** |
 | Total tokens | 0 | 0 |
 
 By scenario (Hit Rate@10 / MRR / MTTC):
 
 | scenario | n | baseline | this agent |
 | --- | --- | --- | --- |
-| buying | 80 | 0.2375 / 0.1265 / 8.63 | **0.9875 / 0.7598 / 1.38** |
-| browsing | 80 | 0.0250 / 0.0045 / 10.75 | **1.0000 / 0.7119 / 1.59** |
+| buying | 80 | 0.2375 / 0.1265 / 8.63 | **0.9875 / 0.7571 / 1.39** |
+| browsing | 80 | 0.0250 / 0.0045 / 10.75 | **1.0000 / 0.7116 / 1.59** |
 | intent_override | 30 | 0.1333 / 0.1042 / 10.07 | **1.0000 / 0.9222 / 3.63** |
-| boundary | 10 | 0.0000 / 0.0000 / 11.00 | **0.9000 / 0.7200 / 2.80** |
+| boundary | 10 | 0.0000 / 0.0000 / 11.00 | **1.0000 / 0.7700 / 2.30** |
 
 Intent-override MTTC cannot go below ~3.5: the evaluator only scores hits from
 the override turn (3 or 4) onward. Two consecutive runs produce byte-identical
@@ -239,12 +288,12 @@ The specification notes the organizer may add natural-language paraphrasing. We
 measured this by rewriting the simulator's sentences at run time (the evaluator
 file is not modified):
 
-| simulator wording | narrow openers | **shipped (wide openers)** |
-| --- | --- | --- |
-| original templates | 0.906508 | 0.906408 |
-| lightly paraphrased | 0.816268 | **0.846778** (+0.031) |
-| heavily paraphrased | 0.816582 | **0.868121** (+0.052) |
-| colloquial | 0.822168 | **0.855730** (+0.034) |
+| simulator wording | score | hit | mrr |
+| --- | --- | --- | --- |
+| original templates | 0.909797 | 0.9950 | 0.764323 |
+| lightly paraphrased | 0.846757 | 0.9500 | 0.659524 |
+| heavily paraphrased | 0.868121 | 0.9650 | 0.697069 |
+| colloquial | 0.854517 | 0.9450 | 0.694391 |
 
 The original degradation was ~0.09. Locating it precisely: **the content words
 are never lost** — the proportion of true category terms reaching the query
@@ -264,6 +313,44 @@ absolute numbers are partly self-referential. The structural finding — loss
 comes from slot recognition, not vocabulary — does not depend on that, since it
 follows from category terms reaching the query 100% of the time regardless.
 
+## Model choice: why this system uses none
+
+Dense retrieval, semantic reranking and local models are all in scope, and the
+absence of any of them here is a measured decision rather than an omission.
+
+**The task is lexical, not semantic.** Simulated constraints are near-verbatim
+excerpts of the target's own `features`/`details` (`"67% Polyester, 33%
+Cotton"`, `"Rubber sole"`). Exact-string matching is precisely where BM25
+outperforms embeddings; the synonym and paraphrase gap that dense retrieval
+exists to close is largely absent from this data.
+
+**The obvious motivation for embeddings did not survive measurement.** Rewriting
+the simulator's wording costs ~0.09, which looked like a vocabulary-matching
+problem. Locating it showed otherwise: the proportion of true category terms
+reaching the query stays at **100%** under every rewrite, while turn-1 category
+*slot* recognition falls from 100% to 15%. The terms were never lost — they were
+demoted from a weight-3.0 slot to a weight-1.0 constraint. Widening the category
+opener patterns recovered +0.014 / +0.052 / +0.034 across three rewrite levels,
+for a few lines of regex. Embeddings do not address slot recognition.
+
+**There is little headroom left where embeddings could act.** Hit Rate is 0.995;
+the one remaining miss is a popularity artefact, not a retrieval failure. That
+leaves MRR, whose bottleneck is `coverage` and `category` saturating across the
+Top 10. A length-normalised cosine probe — the cheapest proxy for "a better text
+similarity" — discriminated slightly *worse* than the current `coverage`
+(target/Top-10 mean 1.196 vs 1.217), so a different similarity over the same
+lexical signal is not the missing ingredient.
+
+**The cost side is concrete.** ONNX weights plus a runtime would take the
+submission from standard-library-only to hundreds of MB and resident memory from
+548 MB to roughly 1 GB, against a rule set that allows "lightweight local
+assets" without defining the bound, and reserves the right to impose CPU, memory
+and timeout limits. Weighed against an unevidenced gain, that trade was declined.
+
+The retrieval interface is nonetheless isolated in `src/ranker.py` behind the
+recall/rerank split, so an additional dense route could be merged into the
+existing candidate pool without touching state management, parsing or policy.
+
 ## Deployment robustness
 
 - **Working directory independent.** `Agent()` takes no required argument and
@@ -273,7 +360,7 @@ follows from category terms reaching the query 100% of the time regardless.
 - **Import path independent.** `starter/agent.py` puts the repository root on
   `sys.path` before importing `src.*`.
 - **Bounded memory.** Token caches are capped (`TOKEN_CACHE_SIZE = 8192`).
-  Resident set peaks at ~535 MB during a full 200-session run and does not grow
+  Resident set peaks at ~548 MB during a full 200-session run and does not grow
   with session count.
 - **No exception escapes `respond()`.** Rerank failure falls back to plain
   BM25; BM25 failure falls back to the previous turn's ranking; a completely
@@ -288,13 +375,15 @@ follows from category terms reaching the query 100% of the time regardless.
 - **Dependencies:** Python standard library only; SQLite must include FTS5
   (default in CPython 3.10+).
 - **Latency:** index build ~2.5 s once per process; 200-session evaluation
-  ~7.5 s, i.e. a few milliseconds per turn.
+  ~9 s, i.e. tens of milliseconds per turn.
 
 ## Limitations
 
-- **Recall ceiling.** Both remaining misses rank 284th and 274th in
-  full-catalog BM25 — inside the match set but outside the Top 200 recall pool.
-  No rerank weight can recover them; enlarging the pool to 400 measured worse.
+- **One remaining miss, and it is not a retrieval failure.** `public_0020`'s
+  target has `rating_number = 1`, so the popularity prior — the single largest
+  contributor to the score — buries it. Its constraints (`cotton`, `grey` in
+  women's novelty apparel) carry no discriminative power either. Recovering it
+  would mean weakening the prior, which costs far more sessions than it saves.
 - **Template sensitivity.** Slot recognition is tuned to the simulator's
   phrasing; paraphrasing costs ~0.09 (measured above, with a validated fix not
   yet shipped).
@@ -309,17 +398,21 @@ follows from category terms reaching the query 100% of the time regardless.
   blue" down-weights rather than excludes. A restated constraint is matched by
   exact text, so `"leather"` does not un-stale `"100% Leather"` (~8% of one
   term's weight).
-- **`user_profile` is stored but unused.** `preference_tags` show a 1.92x lift
-  against target text (32.6% vs 17.0% random), so this is unexploited signal.
+- **`user_profile` carries no usable ranking signal.** Measured both as query
+  terms and as a rerank feature; see the negative result above. The profile is
+  still stored per session and available to future strategies.
 - **ASCII-only tokenisation.** Non-ASCII input yields no matches; the catalog
   is English-only, so this is consistent rather than silently wrong.
-- **`message` is a fixed template.** The evaluator only type-checks it, so this
-  costs no score, but no recommendation rationale is surfaced.
+- **Explanations are descriptive, not causal.** `src/explain.py` reports which
+  stated constraints the top result actually contains, its price and its rating
+  volume. It never claims a constraint the product does not literally match
+  (enforced by a unit test), but it also does not explain *why* the ranker
+  preferred this product over the next one.
 
 ## Reproducing
 
 ```bash
-python3 -m unittest discover -s tests -v     # 39 tests, all offline
+python3 -m unittest discover -s tests -v     # 46 tests, all offline
 python3 -m evaluator.local_evaluator         # writes results.json
 python3 -m scripts.demo_session --scenario intent_override
 ```
