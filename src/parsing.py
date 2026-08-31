@@ -57,9 +57,48 @@ BUDGET_RE = re.compile(
 )
 
 # Envelopes the simulator (and most shoppers) wrap their constraints in.
+# Openers that introduce what the customer is shopping for. Deliberately broad:
+# the specification warns the organizer may paraphrase the simulator's wording,
+# and measurement showed the resulting loss comes from failing to recognise the
+# *category slot*, not from vocabulary mismatch — the category terms still reach
+# the query, they just fall from a weight-3.0 slot to a weight-1.0 constraint.
+# Widening this list restored turn-1 category parsing to 100% under every
+# rewrite tested, with no change on the original templates.
+# Order matters: alternation takes the first match, so longer openers that
+# contain a shorter one ("want to buy" vs "want") must come first.
+CATEGORY_OPENERS = (
+    r"looking to (?:buy|get|find|pick up)",
+    r"trying to (?:buy|get|find)",
+    r"hoping to (?:buy|get|find)",
+    r"want(?:ed)? to (?:buy|get|find|pick up)",
+    r"need(?:ed)? to (?:buy|get|find)",
+    r"window shopping (?:for|around)",
+    r"any recommendations for",
+    r"recommend (?:me )?(?:a|an|some)?",
+    r"in the market for",
+    r"in need of",
+    r"looking for",
+    r"shopping (?:for|around for)",
+    r"browsing (?:for|around)",
+    r"search(?:ing)? for",
+    r"hunting for",
+    r"interested in",
+    r"do you have",
+    r"show me",
+    r"find me",
+    r"get me",
+    # Alternation is tried left-to-right *per start position*, and "I want" starts
+    # earlier than "want to buy", so the pronoun form must swallow the infinitive
+    # itself or it captures "to buy ..." as the category.
+    r"i(?:'m| am)?\s*(?:need(?:ed)?|want(?:ed)?|after|seeking)"
+    r"(?:\s+to\s+(?:buy|get|find|pick up))?",
+    r"need some",
+    r"want some",
+)
 CATEGORY_RE = re.compile(
-    r"\b(?:looking for|shopping for|i need|i want|searching for|show me|find me|"
-    r"interested in|in the market for)\s+(?:(?:a|an|the|some)\s+)?([^.,;!?]{2,120})",
+    r"\b(?:" + "|".join(CATEGORY_OPENERS) + r")"
+    # An em/en dash separates clauses just like a comma, so it also terminates.
+    r"\s+(?:(?:a|an|the|some|any)\s+)?([^.,;!?\u2013\u2014]{2,120})",
     re.I,
 )
 HARD_RE = re.compile(

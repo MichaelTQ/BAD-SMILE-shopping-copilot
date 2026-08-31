@@ -62,6 +62,28 @@ class ParsingTest(unittest.TestCase):
         self.assertEqual(parse_turn("I'm looking for Athletic Walking, but I'm exploring.").category,
                          "Athletic Walking")
 
+    def test_category_survives_paraphrased_openers(self) -> None:
+        # The organizer may paraphrase; the category slot must still be found.
+        cases = {
+            "I'm looking for Shirts T-Shirts. A key requirement is: cotton.": "Shirts T-Shirts",
+            "Hi, I want to buy Shirts T-Shirts. It must be cotton.": "Shirts T-Shirts",
+            "looking to pick up Athletic Walking \u2014 leather is a must": "Athletic Walking",
+            "in the market for Shoes Boots \u2014 leather": "Shoes Boots",
+            "hey do you have Accessories Belts? leather is a must": "Accessories Belts",
+            "any recommendations for Novelty Women?": "Novelty Women",
+            "trying to find Coats Jackets, waterproof": "Coats Jackets",
+            "I need to find Shoes Boots": "Shoes Boots",
+            "I'm after Dresses": "Dresses",
+        }
+        for message, expected in cases.items():
+            self.assertEqual(parse_turn(message).category, expected, msg=message)
+
+    def test_infinitive_is_not_captured_as_the_category(self) -> None:
+        # "I want" starts before "want to buy", so the pronoun form must consume
+        # the infinitive or the category becomes "to buy ...".
+        for message in ("I want to buy Boots", "I need to get Boots", "I wanted to find Boots"):
+            self.assertEqual(parse_turn(message).category, "Boots", msg=message)
+
     def test_splits_multiple_disclosed_constraints(self) -> None:
         parsed = parse_turn("For that, what matters is: cotton; budget around $29.99.")
         self.assertEqual([c.value for c in parsed.constraints], ["cotton", "budget around $29.99"])
@@ -362,6 +384,21 @@ class DeploymentTest(unittest.TestCase):
         with self.assertRaises(FileNotFoundError) as caught:
             resolve_catalog_path("/nonexistent/dir/catalog.jsonl")
         self.assertIn("catalog_path argument", str(caught.exception))
+
+    def test_package_root_is_found_by_walking_up_not_by_fixed_depth(self) -> None:
+        from starter.agent import _find_package_root
+
+        # This repository: <root>/starter/agent.py
+        root = _find_package_root(Path("starter/agent.py").resolve())
+        self.assertTrue((root / "src" / "index.py").is_file())
+
+        # Flat submission layout: submission/agent.py beside submission/src/
+        with tempfile.TemporaryDirectory() as directory:
+            flat = (Path(directory) / "submission").resolve()
+            (flat / "src").mkdir(parents=True)
+            (flat / "agent.py").touch()
+            (flat / "src" / "index.py").touch()
+            self.assertEqual(_find_package_root(flat / "agent.py"), flat)
 
     def test_agent_module_never_imports_the_evaluator_or_the_labels(self) -> None:
         # The agent must not read ground truth. Guard against accidental reuse.
