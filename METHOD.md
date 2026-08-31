@@ -121,6 +121,42 @@ probe. A declined attribute is never asked again; an already-answered attribute
 is skipped while any fresh one remains, and may be revisited at most once
 (`MAX_ASKS = 2`).
 
+## Runtime adaptation
+
+The agent does not run one fixed pipeline. Four decisions are made per turn from
+observable session state, so the strategy changes as the conversation does.
+
+| Runtime signal | What it re-routes | Measured effect |
+| --- | --- | --- |
+| `stalled_turns > 0` — the turn added no information | Opens a third recall route requiring every category term | **+0.0034**; always-on costs −0.013 |
+| Top-10 score spread below `OVERLOAD_CV` | Switches `message` from a ranking to a structured clarification | Fires on 59.2% of turns; miss rate 46.8% when it fires against 9.3% when it does not |
+| `recommended` counts, gated on stall | Applies a novelty penalty so a wrong Top 10 rotates | Recovers `public_0144`; recall widening alone does not |
+| `answered` / `no_preference` / `asked` | Chooses the next question and retires exhausted attributes | Keeps the ask on the highest-disclosure attribute |
+
+Two of these deserve their conditions spelled out, because the conditions are
+what makes them work rather than harm.
+
+**Recall widening is gated, not permanent.** Running the strict category route
+on every turn costs 0.013 — it dilutes rankings that were already correct. Gated
+on stall it gains 0.0034, because by then the current Top 10 is demonstrably
+wrong and there is nothing left to lose. The same gate governs the novelty
+penalty.
+
+**The clarification is calibrated, not decorative.** A flat Top 10 predicts a
+miss: coefficient of variation is 0.0173 on turns that miss against 0.0561 on
+turns that hit. So when the agent says it cannot tell the candidates apart, that
+claim is right about half the time, and when it presents a ranking instead it is
+right over 90% of the time. The wording tracks the score distribution, not a
+turn counter — as soon as the customer supplies a discriminating constraint, the
+ranking gains separation and the message returns to a substantive
+recommendation.
+
+What the agent deliberately does **not** do is cut retrieval off entirely on
+overload. The specification suggests an "immediate retrieval cutoff", but under
+this protocol a turn that returns no products cannot convert, so withholding the
+list spends a turn to buy nothing. The agent instead returns its best ten *and*
+says it cannot separate them — the same information, without the wasted turn.
+
 ## What actually drives the score
 
 Ablation on the 200 public sessions, zeroing one signal at a time:
@@ -477,9 +513,16 @@ every leather product and erases the distinction. Semantic generalisation is a
 liability here, not an asset. An earlier IDF-cosine probe (length-normalised,
 standard library only) reached the same conclusion at 1.196 vs 1.217.
 
-Full-catalog indexing would also take ~0.8 h at the measured 60 ms/embedding, and
-the weights would push the submission past "lightweight local assets", a bound
-the rules do not define. Dense retrieval is therefore not used.
+Full-catalog indexing would also take ~0.8 h at the measured 60 ms/embedding,
+and enabling it needs either a running model service or bundled weights —
+neither exists in the scoring environment, so the route would fall back on
+every one of the 800 private sessions regardless.
+
+`DENSE_ENABLED` is kept in `src/ranker.py`, defaulting to `False`, with the
+attachment point documented: a fourth recall route merged into the same
+candidate pool as the three lexical ones. The pool is a plain dict and the
+reranker scores every candidate uniformly, so an extra source costs nothing
+structurally — the reason it is off is the measurement above, not the wiring.
 
 ### Turn understanding: rules beat the LLM, except where rules fail
 

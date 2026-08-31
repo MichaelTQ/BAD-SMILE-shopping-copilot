@@ -29,6 +29,22 @@ STRICT_ON_STALL_ONLY = True
 # match anyway, so a larger LIMIT is nearly free (200 -> 3000 costs ~4 ms).
 SCORE_LOOKUP_POOL = 3000
 
+# Dense / vector retrieval. DISABLED — measured and rejected.
+# The interface would attach here, as a fourth recall route merged into the same
+# candidate pool as the three lexical routes (the pool is a plain dict, so an
+# extra source costs nothing structurally, and the reranker already scores every
+# candidate uniformly). It stays off because a local 768-dimension embedding
+# model separates the target *worse* than the lexical features it would
+# supplement: target/pool discrimination 1.14 against coverage's 1.31, and
+# ranking by it alone moved the target lower in 24 of 38 sessions. The cause is
+# the dataset itself — simulated constraints are near-verbatim excerpts of the
+# target's own copy, so a string like "100% Leather" is matched exactly by BM25
+# while an embedding places it near every leather product and erases the
+# distinction. Semantic generalisation is a liability under exact-match scoring.
+# Enabling it would also need either a running model service or bundled weights,
+# neither of which exists in the scoring environment. See METHOD.md.
+DENSE_ENABLED = False
+
 # Pseudo-relevance feedback. DISABLED — measured and rejected.
 # The premise is sound: constraints of one intent card all come from the same
 # product, and expansion terms drawn from the Top 10 do hit 11.4% of the
