@@ -14,16 +14,16 @@ RECALL_POOL = 200          # candidates pulled from BM25 before reranking
 CATEGORY_POOL = 100        # extra recall from a category-only query
 
 # Query-side term weights.
-CATEGORY_WEIGHT = 3.0
+CATEGORY_WEIGHT = 2.5
 HARD_WEIGHT = 2.5
 SOFT_WEIGHT = 1.0
 VALUE_BONUS = 1.5          # extra weight for a concrete color/material/size
-OVERRIDE_DECAY = 0.6       # multiplier for constraints superseded by an override
+OVERRIDE_DECAY = 0.7       # multiplier for constraints superseded by an override
 PHRASE_MIN_TOKENS = 3      # shortest constraint that counts as a phrase
 # How a constraint becomes phrase units. "full" requires the entire constraint
 # to appear contiguously, which gets fragile fast: 19.8% of real constraints are
 # longer than 5 tokens (up to 30), and one reordered word zeroes the feature.
-PHRASE_MODE = "full"       # "full" | "ngram" | "truncate"
+PHRASE_MODE = "ngram"       # "full" | "ngram" | "truncate"
 PHRASE_NGRAM = 3           # window size for "ngram"
 PHRASE_MAX_TOKENS = 5      # keep this many leading tokens for "truncate"
 
@@ -38,7 +38,7 @@ W_BUDGET = 0.5
 # Exploration: only applied on turns that added no information, so a target
 # surfaced early (and not yet scoreable, as in intent override) is never
 # rotated away while the conversation is still productive.
-W_SEEN_PENALTY = 0.35
+W_SEEN_PENALTY = 0.5
 MAX_STALL_PRESSURE = 3
 
 
