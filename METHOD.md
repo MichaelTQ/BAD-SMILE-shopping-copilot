@@ -598,4 +598,8 @@ variable and is optional.
 
 ## Team Contributions
 
-<!-- TODO: fill in per-member contributions before submission. -->
+- [**Wenlong Qiu**](https://devpost.com/michael05242016) — Team Leader (`@michael05242016`)
+- [**YUTIAN YE**](https://devpost.com/2004yutianye) (`@2004yutianye`)
+- [**Huibing Wang**](https://devpost.com/iriswang24) (`@iriswang24`)
+- [**Yikai Wang**](https://devpost.com/wyk18700597189) (`@wyk18700597189`)
+- [**zicen qin**](https://devpost.com/zicenqin) (`@zicenqin`)

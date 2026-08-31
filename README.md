@@ -78,11 +78,19 @@ src/index.py              in-memory SQLite FTS5 catalog index
 src/ranker.py             candidate recall and local reranking
 src/explain.py            customer-facing rationale and overload message
 src/llm.py                optional local-LLM fallback, disabled by default
-evaluator/                organizer-compatible public evaluator
+tests/                    46 tests over the agent and its modules
 scripts/demo_session.py   printable end-to-end session trace
 scripts/serve.py          local HTTP bridge for the demo UI; not scored
 frontend/                 React/Vite demo interface; not scored
+
+docs/                     organizer-provided specification (unmodified)
+evaluator/                organizer-provided public evaluator (unmodified)
+data/                     organizer-provided frozen data (not redistributed here)
 ```
+
+Everything above the blank line is ours. The competition specification, the
+evaluator, and the frozen data belong to the organizer and are used as shipped —
+no rule, metric, or label was altered.
 
 ## Setup and installation
 
