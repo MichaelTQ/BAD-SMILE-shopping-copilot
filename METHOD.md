@@ -11,8 +11,12 @@ Retrieval is two-stage: SQLite **FTS5 BM25** recall over the 50k-row catalog,
 followed by a local constraint-aware rerank. The query is built from the whole
 accumulated dialogue rather than only the current message.
 
-On the 200 public sessions: **Hit Rate@10 0.995, MRR 0.764323, MTTC 1.850,
-TechnicalScore 0.909797**, against the `0.10671` BM25 baseline.
+On the 200 public sessions: **Hit Rate@10 0.995, MRR 0.770948, MTTC 1.850,
+TechnicalScore 0.911784**, against the `0.10671` BM25 baseline.
+
+An optional local-LLM fallback exists for turn understanding. It is **disabled
+by default**; with no endpoint configured the agent is exactly the offline
+rule-based system described here.
 
 ## Architecture
 
@@ -25,6 +29,7 @@ src/policy.py        which attribute to ask next + fixed question templates
 src/index.py         FTS5 index + metadata table + document frequencies
 src/ranker.py        BM25 recall (Top 200) -> local rerank -> Top 10
 src/explain.py       customer-facing rationale for the top result
+src/llm.py           optional local-LLM fallback, inert unless configured
 scripts/demo_session.py   development tool: prints one full session
 tests/test_agent.py       43 unit tests (plus the 3 shipped evaluator tests)
 ```
@@ -169,6 +174,10 @@ head-room the current design has.
 | Weights ramping with constraint count | Full set +0.0006, but split-half gave **−0.0019 / +0.0032** — opposite signs, i.e. noise. Removed. |
 | Drop `budget` (99.8% zero) | Exactly 0.0 change; kept, since its lift is 3.24x when it does fire. |
 | Personalize with `user_profile.preference_tags` | Harmful either way: see below. |
+| Pseudo-relevance feedback (predict what the shopper has not said) | −0.068 always-on, −0.003 even gated on stall: see below. |
+| Browsing track: MMR diversity rerank | −0.0025; diversity is actively harmful here. |
+| Buying track: hard constraints as an AND gate | −0.0047; +3 hits but average rank 2.13 → 2.35. |
+| Over-generality detection as a recall trigger | ±0.0001; the signal is real but widening recall does not treat it. |
 | Relax phrase matching from whole-constraint to 3-grams | No score change, and the feature gets **worse**: see below. |
 
 ### Profile personalization: a correlation that vanishes inside the pool
@@ -198,6 +207,135 @@ almost no additional signal — and they are generic, low-IDF words, so giving
 them query weight dilutes the terms that do discriminate. This is a plain
 conditional-independence trap: correlated marginally, near-independent given
 the pool. `W_PROFILE` is kept in `src/ranker.py` at 0.0 with this rationale.
+
+### Pseudo-relevance feedback: a lift measured against the wrong baseline
+
+Every constraint of one intent card is derived from the same product, so
+constraints are strongly correlated — terms shared by the current top candidates
+should predict what the shopper has not disclosed yet. The initial measurement
+looked strong: expansion terms drawn from the turn-1 Top 10 covered **54.8%** of
+the target against **26.5%** of the pool (2.07x lift), and **11.4%** of them hit
+a constraint that was still undisclosed at that point, against a random baseline
+near 0.03%.
+
+Implemented as a second retrieval pass — expand the query with those terms at a
+weight below a stated soft constraint, then re-rank — it loses across the board:
+
+| configuration | hit | mrr | score |
+| --- | --- | --- | --- |
+| off (baseline) | 0.9950 | **0.7709** | **0.9118** |
+| weight 0.15, always on | 0.9900 | 0.5898 | 0.8532 (−0.059) |
+| weight 0.30, always on | 0.9900 | 0.5614 | 0.8442 (−0.068) |
+| weight 0.60, always on | 0.9950 | 0.5538 | 0.8439 (−0.068) |
+| weight 0.30, gated on stall | 0.9950 | 0.7615 | 0.9085 (−0.003) |
+| weight 0.60, gated on stall | 0.9950 | 0.7597 | 0.9082 (−0.004) |
+| weight 1.00, gated on stall | 0.9950 | 0.7594 | 0.9081 (−0.004) |
+
+The 2.07x lift was measured against the wrong baseline. Expansion terms are
+extracted *from the Top 10*, so every document in the Top 10 is rich in them by
+construction; comparing the target against the whole 200-candidate pool lets the
+190 non-top documents depress the denominator and manufacture a lift. The terms
+raise the entire Top 10 together and cannot separate it internally — which is
+exactly where MRR is decided. Query drift then makes it worse: the expanded
+query pulls toward the centroid of the candidate set, so targets that were
+already ranked first slide down.
+
+This is the same trap as the profile-tags result above — correlated marginally,
+near-independent given the pool — and the 11.4% undisclosed-constraint hit rate
+is real but does not translate into ranking power: guessing what the shopper
+will say next is not the same as telling their product apart from ten others
+that match equally well. Unlike the strict-category route, gating on stall does
+not rescue it, and every weight from 0.15 to 1.00 is monotonically worse.
+
+`PRF_ENABLED` remains in `src/ranker.py`, defaulting to `False`, so the code
+path is inert and the score is unchanged to the last digit.
+
+### The four pillars: every routing strategy measured negative
+
+The problem statement asks for dual-track routing — a high-precision filter
+track for Buying, a diverse retrieval track for Browsing. Both were built and
+measured, and both lose.
+
+**Browsing / MMR diversity.** At turn 1 the Top 10 holds only ~2.4 distinct
+category paths, and browsing has both the least diverse pool (0.241) and the
+lowest turn-1 hit rate (0.438) — which looked like a case for spreading the
+results out. Maximal Marginal Relevance over the top 50, with category-path
+Jaccard as the redundancy term, does exactly what it should:
+
+| λ | Top-10 category diversity | mean target rank | hits |
+| --- | --- | --- | --- |
+| off | 0.228 | **2.55** | 40 |
+| 0.9 | 0.235 | 2.58 | 40 |
+| 0.7 | 0.252 | 2.70 | 40 |
+| 0.5 | 0.287 | 2.83 | 40 |
+
+Diversity rises, the target sinks, and the hit count never moves. Full-set score
+falls monotonically (−0.0025 at λ=0.5). The reason is that the evaluator scores
+an exact `parent_asin` match: the target lives in **one** category, so spending
+Top-10 slots on other categories cannot raise the odds of hitting it — it can
+only push it down. Diversity serves real browsing; it does not serve "find this
+one specific item".
+
+**Buying / hard-constraint gate.** Treating stated hard constraints as an `AND`
+gate is safe on its face — the target survives the gate in **80 of 80** sessions
+that state one, and the pool drops from 50000 to a median 8675. But:
+
+| | mean target rank | hits | target bm25 | Top-10 bm25 σ |
+| --- | --- | --- | --- | --- |
+| gate off | **2.13** | 46 | 0.887 | 0.0554 |
+| gate on | 2.35 | **49** | 0.883 | 0.0811 |
+
+The gate finds three more targets and ranks the rest worse, for −0.0047 overall.
+BM25 normalisation is not the culprit (scores and spread both hold up); the
+newly admitted targets simply enter low, while clearing out competitors also
+removes documents that were holding the target's relative position up.
+
+**Over-generality detection.** A flat Top 10 predicts a miss well: coefficient
+of variation is 0.0173 on turns that miss against 0.0561 on turns that hit, and
+the lowest quartile carries a 50.7% miss rate against 31.2% overall. Wired as an
+extra trigger for the strict-category route it fires on 23.2% of turns that the
+stall counter does not — genuinely new coverage, not a redundant signal — and
+changes the score by ±0.0001. The two signals target different failures:
+`stalled_turns` approximates "recall failed for lack of information", which
+widening recall can fix; a flat ranking means "the target is probably already in
+the pool and cannot be ordered", which it cannot.
+
+**The pattern across all of them.** Every change that improved the score —
+Q₀.₉₉ popularity normalisation, stall-gated recall widening, scoring
+secondary-route candidates properly, widening the category opener patterns —
+corrects a **distortion in a signal already in use**. Every change that altered
+the **retrieval strategy** — diversity, filtering, per-track weights,
+pseudo-relevance feedback — measured neutral or negative. Under an exact-match
+protocol, reshaping the candidate set adds no information; it only perturbs a
+ranking that is already tuned.
+
+### Proactive guidance: the one signal that found a use
+
+The over-generality signal is real even though widening recall does not exploit
+it, so it drives what the agent *says* instead. When the Top 10 are effectively
+tied, `message` switches from presenting a ranking to admitting there isn't one:
+
+```text
+turn 1  These 10 are all Athletic Walking, and I can't tell them apart on
+        what you've told me so far. What matters most to you in this purchase?
+turn 3  Here are the closest matches... Top pick: Skechers Men's Go Max-Athletic
+        Air Mesh... — matches 100% Textile and Imported; costs $54.97; ...
+```
+
+The switch is driven by the score distribution, not a turn counter — as soon as
+the customer supplies `100% Textile; Imported`, the ranking gains separation and
+the wording returns to a substantive recommendation. The claim is calibrated:
+
+| | share of turns | miss rate |
+| --- | --- | --- |
+| clarification fired | 59.2% | **46.8%** |
+| clarification did not fire | 40.8% | **9.3%** |
+
+A five-fold difference: when the agent says it cannot tell the candidates apart,
+it is wrong about half the time, and when it presents a ranking it is right over
+90% of the time. The evaluator only type-checks `message`, so this costs no
+score — it exists because `message` is the only human-facing output, and an
+honest one is worth more than a confident one.
 
 ### Phrase matching: why whole-constraint beats n-grams here
 
@@ -263,19 +401,19 @@ sparse features were revised accordingly.
 | metric | BM25 baseline | this agent |
 | --- | --- | --- |
 | Hit Rate@10 | 0.125 | **0.995** |
-| MRR | 0.068034 | **0.764323** |
+| MRR | 0.068034 | **0.770948** |
 | MTTC | 9.81 | **1.850** |
 | Efficiency | 0.119 | **0.915** |
-| **TechnicalScore** | 0.10671 | **0.909797** |
+| **TechnicalScore** | 0.10671 | **0.911784** |
 | Total tokens | 0 | 0 |
 
 By scenario (Hit Rate@10 / MRR / MTTC):
 
 | scenario | n | baseline | this agent |
 | --- | --- | --- | --- |
-| buying | 80 | 0.2375 / 0.1265 / 8.63 | **0.9875 / 0.7571 / 1.39** |
-| browsing | 80 | 0.0250 / 0.0045 / 10.75 | **1.0000 / 0.7116 / 1.59** |
-| intent_override | 30 | 0.1333 / 0.1042 / 10.07 | **1.0000 / 0.9222 / 3.63** |
+| buying | 80 | 0.2375 / 0.1265 / 8.63 | **0.9875 / 0.7663 / 1.39** |
+| browsing | 80 | 0.0250 / 0.0045 / 10.75 | **1.0000 / 0.7123 / 1.59** |
+| intent_override | 30 | 0.1333 / 0.1042 / 10.07 | **1.0000 / 0.9400 / 3.63** |
 | boundary | 10 | 0.0000 / 0.0000 / 11.00 | **1.0000 / 0.7700 / 2.30** |
 
 Intent-override MTTC cannot go below ~3.5: the evaluator only scores hits from
@@ -290,10 +428,10 @@ file is not modified):
 
 | simulator wording | score | hit | mrr |
 | --- | --- | --- | --- |
-| original templates | 0.909797 | 0.9950 | 0.764323 |
-| lightly paraphrased | 0.846757 | 0.9500 | 0.659524 |
-| heavily paraphrased | 0.868121 | 0.9650 | 0.697069 |
-| colloquial | 0.854517 | 0.9450 | 0.694391 |
+| original templates | 0.911784 | 0.9950 | 0.770948 |
+| lightly paraphrased | 0.845380 | 0.9500 | 0.654933 |
+| heavily paraphrased | 0.868279 | 0.9650 | 0.697264 |
+| colloquial | 0.853257 | 0.9450 | 0.690190 |
 
 The original degradation was ~0.09. Locating it precisely: **the content words
 are never lost** — the proportion of true category terms reaching the query
@@ -313,43 +451,81 @@ absolute numbers are partly self-referential. The structural finding — loss
 comes from slot recognition, not vocabulary — does not depend on that, since it
 follows from category terms reaching the query 100% of the time regardless.
 
-## Model choice: why this system uses none
+## Model choice, and the optional local-LLM fallback
 
-Dense retrieval, semantic reranking and local models are all in scope, and the
-absence of any of them here is a measured decision rather than an omission.
+Dense retrieval, semantic reranking and local models are all in scope. Both were
+run against local models before being scoped down, and the measurements are
+below.
 
-**The task is lexical, not semantic.** Simulated constraints are near-verbatim
-excerpts of the target's own `features`/`details` (`"67% Polyester, 33%
-Cotton"`, `"Rubber sole"`). Exact-string matching is precisely where BM25
-outperforms embeddings; the synonym and paraphrase gap that dense retrieval
-exists to close is largely absent from this data.
+### Dense retrieval: measured and rejected
 
-**The obvious motivation for embeddings did not survive measurement.** Rewriting
-the simulator's wording costs ~0.09, which looked like a vocabulary-matching
-problem. Locating it showed otherwise: the proportion of true category terms
-reaching the query stays at **100%** under every rewrite, while turn-1 category
-*slot* recognition falls from 100% to 15%. The terms were never lost — they were
-demoted from a weight-3.0 slot to a weight-1.0 constraint. Widening the category
-opener patterns recovered +0.014 / +0.052 / +0.034 across three rewrite levels,
-for a few lines of regex. Embeddings do not address slot recognition.
+A 768-dimension local embedding model (`embeddinggemma`) was run over the
+candidate pool of 38 sessions (1178 embedding calls) and compared against the
+existing features on their ability to separate the target:
 
-**There is little headroom left where embeddings could act.** Hit Rate is 0.995;
-the one remaining miss is a popularity artefact, not a retrieval failure. That
-leaves MRR, whose bottleneck is `coverage` and `category` saturating across the
-Top 10. A length-normalised cosine probe — the cheapest proxy for "a better text
-similarity" — discriminated slightly *worse* than the current `coverage`
-(target/Top-10 mean 1.196 vs 1.217), so a different similarity over the same
-lexical signal is not the missing ingredient.
+| feature | target / pool mean | Top-10 coefficient of variation |
+| --- | --- | --- |
+| dense (embeddinggemma 768d) | 1.1379 | 0.0868 |
+| `coverage` (existing) | **1.3054** | 0.0975 |
+| `popularity` (existing) | **1.6797** | — |
 
-**The cost side is concrete.** ONNX weights plus a runtime would take the
-submission from standard-library-only to hundreds of MB and resident memory from
-548 MB to roughly 1 GB, against a rule set that allows "lightweight local
-assets" without defining the bound, and reserves the right to impose CPU, memory
-and timeout limits. Weighed against an unevidenced gain, that trade was declined.
+Ranking by dense similarity alone moved the target **later in 24 of 38 sessions**
+and earlier in only 2. The cause is the same dataset property noted throughout:
+constraints are near-verbatim excerpts of the target's own copy, so a string like
+`"100% Leather"` is exactly matched by BM25, while an embedding places it near
+every leather product and erases the distinction. Semantic generalisation is a
+liability here, not an asset. An earlier IDF-cosine probe (length-normalised,
+standard library only) reached the same conclusion at 1.196 vs 1.217.
 
-The retrieval interface is nonetheless isolated in `src/ranker.py` behind the
-recall/rerank split, so an additional dense route could be merged into the
-existing candidate pool without touching state management, parsing or policy.
+Full-catalog indexing would also take ~0.8 h at the measured 60 ms/embedding, and
+the weights would push the submission past "lightweight local assets", a bound
+the rules do not define. Dense retrieval is therefore not used.
+
+### Turn understanding: rules beat the LLM, except where rules fail
+
+Category-slot recognition, rules vs a local LLM (`qwen3`), over 30 sessions at
+five phrasing levels:
+
+| wording | rules | LLM |
+| --- | --- | --- |
+| original templates | **100.0%** | 96.7% |
+| lightly paraphrased | **100.0%** | 96.7% |
+| heavily paraphrased | **100.0%** | 96.7% |
+| colloquial | **100.0%** | 96.7% |
+| extreme colloquial | 0.0% | **93.3%** |
+
+The rules win on every phrasing they cover, and lose completely outside it. So
+the LLM is wired as a **fallback, not a replacement**: `src/llm.py` is consulted
+only when the rules extract no category at all, which holds the call rate at
+exactly the rule-failure rate — zero on all four covered levels.
+
+Reasoning mode had to be disabled: with it on, a call took 25.1 s, emitted 573
+tokens and answered *"Athletic Wear"*; with `think: false` it took 0.9 s, emitted
+16 tokens and answered *"Athletic Walking"* correctly.
+
+### Disclosure
+
+| | |
+| --- | --- |
+| Scored offline path | no model, 0 tokens, $0 |
+| Optional fallback | local `qwen3` via an Ollama-compatible endpoint |
+| Cost | $0 — runs locally, no API, no credentials |
+| Latency | 1163 ms median per call; 0 ms when rules succeed |
+| Tokens | 70 prompt / 21 completion per call (not reported in `usage`, which stays 0 for the scored path) |
+| Call rate | equal to the rule-failure rate: 0% on the original templates |
+
+### Network and fallback behaviour
+
+**The submission requires no network access.** `src/llm.py` activates only when
+`TECHJAM_LLM_ENDPOINT` is set. Unset — the default, and the state of the scored
+run — the module is inert and the agent is purely rule-based. When it *is*
+configured, every failure mode (absent service, probe timeout, call timeout,
+unparseable response) silently retains the rule-based result. There is no path
+by which the model's absence degrades the offline system.
+
+`src/ranker.py` keeps recall and rerank separate, so a dense route could be
+merged into the existing candidate pool without touching state, parsing or
+policy — the evidence above is why one is not.
 
 ## Deployment robustness
 

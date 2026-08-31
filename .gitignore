@@ -4,7 +4,13 @@ __pycache__/
 .DS_Store
 .env
 results.json
-# data/catalog.jsonl
+# Competition data is distributed by the organizer, not by us. It stays local:
+# see data/README.md for the download and SHA256 verification steps.
+data/catalog.jsonl
+data/catalog_to_csv/
+data/category_count.csv
+data/public_set.jsonl
+data/public_set.csv
 # data/releases/
 # Organizer-only code, private evaluation data, manifests, and build reports.
 organizer/

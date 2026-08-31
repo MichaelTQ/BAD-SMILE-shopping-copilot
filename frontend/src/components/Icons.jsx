@@ -1,5 +1,11 @@
-export function BagIcon({ size = 22 }) {
-  return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M5.5 8.5h13l-.75 10.3a1.7 1.7 0 0 1-1.7 1.55H7.95a1.7 1.7 0 0 1-1.7-1.55L5.5 8.5Z" stroke="currentColor" strokeWidth="1.7"/><path d="M8.5 9V6.4a3.5 3.5 0 0 1 7 0V9" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round"/></svg>
+export function CartIcon({ size = 22 }) {
+  return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true">
+    <path d="M2.4 3.9h1.75a1.2 1.2 0 0 1 1.17.94l.34 1.56" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"/>
+    <path d="M5.66 6.4H21.1l-1.83 7.35a1.7 1.7 0 0 1-1.65 1.3H9.05a1.7 1.7 0 0 1-1.66-1.33L5.66 6.4Z" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round"/>
+    <path d="M7.5 9.9h12.1" stroke="currentColor" strokeWidth="1.1" opacity=".45"/>
+    <circle cx="9.9" cy="19.3" r="1.55" stroke="currentColor" strokeWidth="1.6"/>
+    <circle cx="17.4" cy="19.3" r="1.55" stroke="currentColor" strokeWidth="1.6"/>
+  </svg>
 }
 
 export function SparkIcon({ size = 20 }) {

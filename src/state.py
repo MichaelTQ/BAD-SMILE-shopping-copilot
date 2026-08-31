@@ -40,6 +40,11 @@ class SessionState:
 
     turns: int = 0
     overrides: int = 0
+    # Coefficient of variation of the previous turn's Top-10 scores. A flat
+    # ranking means the scorer cannot separate the head: measured at 0.0173 on
+    # turns that missed against 0.0561 on turns that hit.
+    last_score_cv: float = 0.0
+
     # Consecutive turns that produced no new information. Drives exploration:
     # if the customer keeps adding nothing and the target has not surfaced,
     # the current Top 10 is simply wrong and needs to rotate.

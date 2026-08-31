@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { ArrowIcon, BagIcon, SparkIcon } from './Icons'
+import { ArrowIcon, CartIcon, SparkIcon } from './Icons'
 
 const examples = [
   'Waterproof hiking boots under $150',
@@ -9,10 +9,9 @@ const examples = [
 
 function WelcomeScreen({ onExample }) {
   return <section className="welcome-screen">
-    <span className="welcome-icon"><BagIcon size={31} /></span>
+    <span className="welcome-icon"><CartIcon size={31} /></span>
     <p className="kicker">YOUR CATALOG GUIDE</p>
     <h1>Shop with more clarity.</h1>
-    <p>Tell BAD SMILE what you need. It will ask focused follow-up questions and surface the closest catalog matches.</p>
     <div className="example-list" aria-label="Try a shopping example">
       {examples.map((example) => <button key={example} type="button" onClick={() => onExample(example)}>{example}<ArrowIcon /></button>)}
     </div>

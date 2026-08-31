@@ -29,6 +29,44 @@ STRICT_ON_STALL_ONLY = True
 # match anyway, so a larger LIMIT is nearly free (200 -> 3000 costs ~4 ms).
 SCORE_LOOKUP_POOL = 3000
 
+# Pseudo-relevance feedback. DISABLED — measured and rejected.
+# The premise is sound: constraints of one intent card all come from the same
+# product, and expansion terms drawn from the Top 10 do hit 11.4% of the
+# still-undisclosed constraints (random baseline ~0.03%). But the 2.07x lift
+# that motivated it was measured against the wrong baseline: the terms are
+# extracted *from* the Top 10, so the whole Top 10 is rich in them by
+# construction and they cannot separate it internally — which is where MRR is
+# decided. Always-on costs -0.068; gating on stall still costs -0.003; every
+# weight from 0.15 to 1.00 is monotonically worse. Kept only so the experiment
+# is reproducible.
+PRF_ENABLED = False
+PRF_FEEDBACK_DOCS = 10     # top candidates treated as relevant
+PRF_TERMS = 15             # expansion terms taken from them
+PRF_WEIGHT = 0.3           # per-term query weight (soft constraint is 1.0)
+PRF_ON_STALL_ONLY = False  # restrict to turns that added no information
+
+# Dual-track routing. A shopper who has stated a hard requirement is buying and
+# wants precision; one who has not is browsing and is better served by breadth.
+# Measured at turn 1, the Top 10 holds only ~2.4 distinct category paths, and
+# browsing has both the least diverse pool (0.241) and the lowest turn-1 hit
+# rate (0.438) — ten near-duplicates from two subcategories cover less ground
+# than ten spread across the space the shopper might mean.
+MMR_ENABLED = False
+MMR_LAMBDA = 0.7           # 1.0 = pure relevance, i.e. disabled
+MMR_POOL = 50              # reranked window
+MMR_BROWSE_ONLY = True     # only when no hard constraint has been stated
+
+# Buying track. Once a hard requirement is stated it is treated as a gate rather
+# than a bonus: only products containing every hard-constraint term enter the
+# pool. Verified safe on the public set — the target survives the gate in 80/80
+# sessions that state one, while the pool drops from 50000 to a median 8675.
+BUYING_FILTER = False
+
+# Over-generality detection. A flat Top-10 means the ranking has no opinion, so
+# widening recall costs nothing and may help. 0.0 disables it and leaves the
+# stall counter as the sole trigger.
+OVERLOAD_CV = 0.0
+
 # Query-side term weights.
 CATEGORY_WEIGHT = 2.5
 HARD_WEIGHT = 2.5
@@ -39,7 +77,7 @@ PHRASE_MIN_TOKENS = 3      # shortest constraint that counts as a phrase
 # How a constraint becomes phrase units. "full" requires the entire constraint
 # to appear contiguously, which gets fragile fast: 19.8% of real constraints are
 # longer than 5 tokens (up to 30), and one reordered word zeroes the feature.
-PHRASE_MODE = "ngram"       # "full" | "ngram" | "truncate"
+PHRASE_MODE = "full"       # "full" | "ngram" | "truncate"
 PHRASE_NGRAM = 3           # window size for "ngram"
 PHRASE_MAX_TOKENS = 5      # keep this many leading tokens for "truncate"
 
@@ -101,7 +139,25 @@ def build_query(state: SessionState) -> tuple[dict[str, float], list[str], list[
         for value in values:
             add(value, VALUE_BONUS)
 
+    # A budget amount is a filter, not a content word. It already drives the
+    # price feature; leaving it in the query also matches unrelated products
+    # that merely carry the number ("under $150" pulling in "150 Pack ... Bags").
+    if state.budget is not None:
+        for form in _budget_tokens(state.budget):
+            weights.pop(form, None)
+            if form in category_terms:
+                category_terms = [t for t in category_terms if t != form]
+
     return weights, category_terms, phrases
+
+
+def _budget_tokens(amount: float) -> set[str]:
+    """Token spellings a parsed budget could have contributed to the query."""
+    forms = {str(int(amount)), f"{amount:g}"}
+    text = f"{amount:g}"
+    if "." in text:
+        forms.update(text.split("."))
+    return {form for form in forms if form}
 
 
 def _phrase_units(terms: list[str]) -> list[str]:
@@ -141,14 +197,64 @@ def _budget_fit(document: Document, budget: float | None) -> float:
     return -min(1.0, (document.price - budget) / max(budget, 1.0))
 
 
+def expansion_terms(index: CatalogIndex, scored: list[Scored], known: set[str]) -> list[str]:
+    """Terms shared by the top candidates that the shopper has not mentioned."""
+    if not scored:
+        return []
+    counts: dict[str, int] = {}
+    for item in scored[:PRF_FEEDBACK_DOCS]:
+        for term in index.token_set(item.document):
+            if term not in known:
+                counts[term] = counts.get(term, 0) + 1
+    if not counts:
+        return []
+    docs = min(PRF_FEEDBACK_DOCS, len(scored))
+    ranked = sorted(counts, key=lambda t: -(counts[t] / docs) * index.idf(t))
+    return ranked[:PRF_TERMS]
+
+
 def rank(index: CatalogIndex, state: SessionState, top_k: int) -> list[Scored]:
     """Recall Top ~200 with BM25, then rerank locally and return Top ``top_k``."""
+    scored = _rank_once(index, state, top_k)
+    use_prf = PRF_ENABLED and PRF_WEIGHT > 0 and (
+        state.stalled_turns > 0 or not PRF_ON_STALL_ONLY
+    )
+    if not use_prf or not scored:
+        return scored
+    weights, _, _ = build_query(state)
+    extra = expansion_terms(index, scored, set(weights))
+    if not extra:
+        return scored
+    return _rank_once(index, state, top_k, {term: PRF_WEIGHT for term in extra})
+
+
+def _rank_once(
+    index: CatalogIndex,
+    state: SessionState,
+    top_k: int,
+    expansion: dict[str, float] | None = None,
+) -> list[Scored]:
     weights, category_terms, phrases = build_query(state)
+    for term, weight in (expansion or {}).items():
+        weights[term] = weights.get(term, 0.0) + weight
     if not weights:
         return []
 
     ordered = sorted(weights, key=lambda term: -weights[term] * index.idf(term))
-    ranked = index.search(ordered, max(RECALL_POOL, SCORE_LOOKUP_POOL))
+    gate: list[str] = []
+    if BUYING_FILTER:
+        gate = [
+            term
+            for constraint in state.constraints
+            if constraint.hard and not constraint.stale
+            for term in query_tokens(constraint.value)
+        ]
+    if gate:
+        ranked = index.search_filtered(gate, ordered, max(RECALL_POOL, SCORE_LOOKUP_POOL))
+        if not ranked:                      # gate too strict — fall back to OR
+            ranked = index.search(ordered, max(RECALL_POOL, SCORE_LOOKUP_POOL))
+    else:
+        ranked = index.search(ordered, max(RECALL_POOL, SCORE_LOOKUP_POOL))
     lookup = dict(ranked)
     pool = dict(ranked[:RECALL_POOL])
     if category_terms:
@@ -156,7 +262,11 @@ def rank(index: CatalogIndex, state: SessionState, top_k: int) -> list[Scored]:
         if (
             STRICT_CATEGORY_POOL
             and len(category_terms) > 1
-            and (state.stalled_turns > 0 or not STRICT_ON_STALL_ONLY)
+            and (
+                state.stalled_turns > 0
+                or (OVERLOAD_CV > 0.0 and 0.0 < state.last_score_cv < OVERLOAD_CV)
+                or not STRICT_ON_STALL_ONLY
+            )
         ):
             strict = index.search_all(category_terms, STRICT_CATEGORY_POOL)
             if len(strict) >= STRICT_CATEGORY_POOL:
@@ -222,7 +332,46 @@ def rank(index: CatalogIndex, state: SessionState, top_k: int) -> list[Scored]:
         scored.append(Scored(document, sum(parts.values()), parts))
 
     scored.sort(key=lambda item: (-item.score, item.document.parent_asin))
+    if MMR_ENABLED and MMR_LAMBDA < 1.0 and len(scored) > top_k:
+        if not (MMR_BROWSE_ONLY and state.hard_constraints()):
+            return _diversify(index, scored, top_k)
     return scored[:top_k]
+
+
+def _category_similarity(index: CatalogIndex, a: Document, b: Document) -> float:
+    """Jaccard over category paths — the axis the pool is actually collapsed on."""
+    left, right = index.category_tokens(a), index.category_tokens(b)
+    if not left or not right:
+        return 0.0
+    return len(left & right) / len(left | right)
+
+
+def _diversify(index: CatalogIndex, scored: list[Scored], top_k: int) -> list[Scored]:
+    """Maximal Marginal Relevance over the top window.
+
+    Each pick trades its own score against how much it duplicates what is
+    already selected, so the returned list spans more of the catalog instead of
+    stacking near-identical products from one subcategory.
+    """
+    window = scored[:MMR_POOL]
+    best = window[0].score or 1.0
+    worst = window[-1].score
+    span = (best - worst) or 1.0
+    selected: list[Scored] = [window[0]]
+    remaining = window[1:]
+    while remaining and len(selected) < top_k:
+        best_index, best_value = 0, None
+        for position, candidate in enumerate(remaining):
+            relevance = (candidate.score - worst) / span
+            redundancy = max(
+                _category_similarity(index, candidate.document, chosen.document)
+                for chosen in selected
+            )
+            value = MMR_LAMBDA * relevance - (1.0 - MMR_LAMBDA) * redundancy
+            if best_value is None or value > best_value:
+                best_index, best_value = position, value
+        selected.append(remaining.pop(best_index))
+    return selected
 
 
 def bm25_only(index: CatalogIndex, message: str, top_k: int) -> list[Scored]:

@@ -33,7 +33,7 @@ _REPO_ROOT = _find_package_root(Path(__file__).resolve())
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from src.explain import explain
+from src.explain import clarification, explain, is_overloaded
 from src.index import CatalogIndex
 from src.llm import LocalLLM
 from src.parsing import parse_turn
@@ -47,6 +47,20 @@ CATALOG_ENV_VAR = "TECHJAM_CATALOG"
 
 RESULT_MESSAGE = "Here are the closest matches based on what you've told me so far."
 NO_RESULT_MESSAGE = "I couldn't narrow it down yet."
+
+
+#: How far up to look for a ``data/`` directory beside an ancestor.
+CATALOG_SEARCH_DEPTH = 4
+
+
+def _data_candidates(start: Path) -> list[Path]:
+    """``data/catalog.jsonl`` beside ``start`` and each of its near ancestors."""
+    seen: list[Path] = []
+    for depth, base in enumerate((start, *start.parents)):
+        if depth > CATALOG_SEARCH_DEPTH:
+            break
+        seen.append(base / "data" / "catalog.jsonl")
+    return seen
 
 
 def resolve_catalog_path(explicit: str | Path | None = None) -> Path:
@@ -67,16 +81,26 @@ def resolve_catalog_path(explicit: str | Path | None = None) -> Path:
                 return path
             raise FileNotFoundError(f"catalog.jsonl not found at {origin}: {path}")
 
-    candidates = (
-        _REPO_ROOT / "data" / "catalog.jsonl",
-        Path.cwd() / "data" / "catalog.jsonl",
+    # The harness may place this package anywhere relative to the catalog, and
+    # the API contract does not specify how Agent is constructed, so search
+    # upward from both the package and the working directory rather than
+    # assuming one fixed layout.
+    candidates = [
+        *_data_candidates(_REPO_ROOT),
+        *_data_candidates(Path.cwd()),
         Path(__file__).resolve().parent / "data" / "catalog.jsonl",
-    )
+    ]
     for candidate in candidates:
         if candidate.is_file():
             return candidate
-    searched = ", ".join(str(candidate) for candidate in candidates)
-    raise FileNotFoundError(f"catalog.jsonl not found. Looked in: {searched}")
+    searched = "\n  ".join(str(candidate) for candidate in candidates)
+    raise FileNotFoundError(
+        "catalog.jsonl not found. The competition catalog is distributed by the "
+        "organizer and is not stored in this repository.\n"
+        "Place it at <repo>/data/catalog.jsonl, or point TECHJAM_CATALOG at it, "
+        "or pass its path to Agent(...).\n"
+        f"Looked in:\n  {searched}"
+    )
 
 
 class Agent:
@@ -107,10 +131,15 @@ class Agent:
             state = self.sessions[session_id]
 
         rationale = ""
+        overloaded = False
+        scored: list = []
         try:
             scored = self._rank(state, user_message, top_k)
             recommendations = _as_payload(scored, top_k)
-            rationale = explain(self.index, state, scored)
+            state.last_score_cv = _score_spread(scored[:top_k])
+            overloaded = is_overloaded(scored[:top_k])
+            if not overloaded:
+                rationale = explain(self.index, state, scored)
         except Exception:
             recommendations = self._fallback(state, user_message, top_k)
 
@@ -120,7 +149,12 @@ class Agent:
         except Exception:
             attribute, question = "other", question_for("other")
 
-        opening = RESULT_MESSAGE if recommendations else NO_RESULT_MESSAGE
+        if overloaded and recommendations:
+            # The ranking has no opinion: say so and ask, rather than presenting
+            # an arbitrary order as if it were a considered one.
+            opening = clarification(state, scored[:top_k], attribute)
+        else:
+            opening = RESULT_MESSAGE if recommendations else NO_RESULT_MESSAGE
         message = " ".join(part for part in (opening, rationale, question) if part)
         try:
             state.record_response(
@@ -170,6 +204,18 @@ class Agent:
         # Repeating the previous ranking beats returning nothing: an empty turn
         # can never hit, whereas a stale list still can.
         return [{"parent_asin": asin} for asin in state.last_recommendations[:top_k]]
+
+
+def _score_spread(scored: list) -> float:
+    """Coefficient of variation of the returned scores; 0 when undefined."""
+    if len(scored) < 2:
+        return 0.0
+    values = [item.score for item in scored]
+    mean = sum(values) / len(values)
+    if mean <= 0:
+        return 0.0
+    variance = sum((v - mean) ** 2 for v in values) / len(values)
+    return (variance ** 0.5) / mean
 
 
 def _as_payload(scored: list, top_k: int) -> list[dict]:

@@ -1,5 +1,5 @@
 import { useCallback, useState } from 'react'
-import { mockShoppingClient } from '../api/mockShoppingClient'
+import { shoppingClient } from '../api/shoppingClient'
 
 const openingMessage = {
   id: 'opening',
@@ -32,7 +32,7 @@ export function useShoppingSession() {
     }
 
     try {
-      const response = await mockShoppingClient.respond({ sessionId, message: text, preferences, turn: nextTurn })
+      const response = await shoppingClient.respond({ sessionId, message: text, turn: nextTurn })
       setPreferences(response.preferences)
       setRecommendations(response.recommendations)
       setTurn(nextTurn)
@@ -64,7 +64,7 @@ export function useShoppingSession() {
     setError('')
     const nextSessionId = createSessionId()
     try {
-      const response = await mockShoppingClient.reset({ sessionId: nextSessionId })
+      const response = await shoppingClient.reset({ sessionId: nextSessionId })
       setSessionId(nextSessionId)
       setMessages([{ ...openingMessage, text: response.message }])
       setPreferences([])

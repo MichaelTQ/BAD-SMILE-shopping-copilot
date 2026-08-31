@@ -123,6 +123,12 @@ OVERRIDE_RE = re.compile(
     re.I,
 )
 NUDGE_RE = re.compile(r"not quite right|ask me about", re.I)
+# A bare noun phrase names what the shopper wants; a sentence with a verb is a
+# statement about it and should stay a constraint.
+_VERB_OPENER_RE = re.compile(
+    r"\b(?:is|are|was|were|has|have|had|do|does|did|can|could|should|would|"
+    r"will|prefer|like|want|need|think|matter|matters|care)\b", re.I
+)
 
 
 @dataclass(frozen=True)
@@ -248,6 +254,24 @@ def parse_turn(message: str) -> ParsedTurn:
         sentence = _clean(sentence)
         if _is_informative(sentence) and not NUDGE_RE.search(sentence):
             parsed.constraints.append(Constraint(classify(sentence), sentence, False))
+
+    # A shopper often names the product and the budget in one breath
+    # ("waterproof hiking boots under $150"). Without stripping the amount the
+    # whole sentence classifies as `budget` and the category slot goes empty,
+    # which costs it the category weight. The simulator always states budget
+    # separately, so this only affects free-form input.
+    if parsed.category is None:
+        stripped = _clean(BUDGET_RE.sub(" ", residual))
+        # "under $150" leaves a dangling preposition once the amount is removed.
+        stripped = _clean(re.sub(
+            r"\b(?:under|below|less than|budget(?: of)?|up to|max(?:imum)?|around|about)\s*$",
+            "", stripped, flags=re.I))
+        if _is_informative(stripped, minimum=1) and not _VERB_OPENER_RE.search(stripped):
+            parsed.category = stripped[:120]
+            parsed.constraints = [
+                c for c in parsed.constraints
+                if _clean(c.value) != _clean(residual)
+            ]
 
     budget_match = BUDGET_RE.search(text)
     if budget_match:

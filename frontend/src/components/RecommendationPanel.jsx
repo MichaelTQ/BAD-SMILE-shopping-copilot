@@ -1,13 +1,13 @@
 import { useState } from 'react'
-import { BagIcon, ChevronIcon } from './Icons'
+import { CartIcon, ChevronIcon } from './Icons'
 import { matchLabels } from '../utils/matchPresentation'
 
 const categorySymbols = { boot: '⌁', shoe: '◒', jacket: '◇', shirt: '▤', bag: '◫', belt: '⎯', leggings: '∿', dress: '♢', scarf: '≈' }
 
 function ProductVisual({ visual, title }) {
-  return <div className={`catalog-tile tone-${visual.tone} texture-${visual.texture}`} aria-label={`${title} catalog preview`} role="img">
+  return <div className={`catalog-tile tone-${visual.tone} texture-${visual.texture}`} aria-label={`${title} product preview`} role="img">
     <span aria-hidden="true">{categorySymbols[visual.icon] || '✦'}</span>
-    <small>CATALOG</small>
+    <small>PRODUCT</small>
   </div>
 }
 
@@ -22,7 +22,11 @@ function ProductCard({ product }) {
         <span className={`match-level level-${product.matchLevel}`}>{matchLabels[product.matchLevel]}</span>
         <strong>{product.title}</strong>
         <span className="product-store">{product.store} · {categoryText}</span>
-        <span className="product-metrics"><b>★ {product.averageRating.toFixed(1)}</b><span>{product.ratingNumber.toLocaleString()} reviews</span><em>${product.price.toFixed(2)}</em></span>
+        <span className="product-metrics">
+          {Number.isFinite(product.averageRating) && <b>★ {product.averageRating.toFixed(1)}</b>}
+          {Number.isFinite(product.ratingNumber) && <span>{product.ratingNumber.toLocaleString()} reviews</span>}
+          <em>{Number.isFinite(product.price) ? `$${product.price.toFixed(2)}` : 'Price not listed'}</em>
+        </span>
       </span>
       <span className="chevron"><ChevronIcon /></span>
     </button>
@@ -46,7 +50,7 @@ function PreferenceSummary({ preferences }) {
 }
 
 function EmptyResults() {
-  return <div className="results-empty"><span><BagIcon size={34} /></span><h3>Catalog matches will appear here.</h3><p>Start with a product, occasion, material, color, budget, or feature.</p></div>
+  return <div className="results-empty"><span><CartIcon size={34} /></span><h3>Catalog matches will appear here.</h3><p>Start with a product, occasion, material, color, budget, or feature.</p></div>
 }
 
 function LoadingResults() {
@@ -56,7 +60,7 @@ function LoadingResults() {
 export function RecommendationPanel({ preferences, recommendations, status, isStarted }) {
   const loading = status === 'loading'
   return <aside className="recommendation-panel" aria-labelledby="recommendation-title">
-    <div className="recommendation-heading"><div><p className="kicker">RECOMMENDATIONS</p><h2 id="recommendation-title">{isStarted ? 'Recommended for you' : 'Suggestions will appear here.'}</h2></div>{isStarted && <span className="count-badge">12 suggestions</span>}</div>
+    <div className="recommendation-heading"><div><p className="kicker">RECOMMENDATIONS</p><h2 id="recommendation-title">{isStarted ? 'Recommended for you' : 'Suggestions will appear here.'}</h2></div></div>
     <PreferenceSummary preferences={preferences} />
     <div className="results-body">
       {loading && !recommendations.length ? <LoadingResults /> : !recommendations.length ? <EmptyResults /> : <><p className="result-explainer">Each suggestion highlights the details that fit your request.</p><div className="product-list">{recommendations.map((product) => <ProductCard product={product} key={product.parent_asin} />)}</div></>}

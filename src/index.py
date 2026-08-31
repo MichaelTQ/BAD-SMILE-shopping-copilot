@@ -194,6 +194,30 @@ class CatalogIndex:
             ).fetchall()
         return [(int(row[0]), -float(row[1])) for row in rows]
 
+    def search_filtered(
+        self, required: list[str], optional: list[str], limit: int
+    ) -> list[tuple[int, float]]:
+        """BM25 over documents containing every ``required`` term.
+
+        Ranking still uses the full term set, so the required terms act as a
+        gate rather than as the whole query.
+        """
+        must = list(dict.fromkeys(t for t in required if t))[:8]
+        should = list(dict.fromkeys(t for t in optional if t))[:60]
+        if not must:
+            return self.search(should, limit)
+        gate = " AND ".join(f'"{term}"' for term in must)
+        expression = gate if not should else (
+            f"({gate}) AND (" + " OR ".join(f'"{t}"' for t in should) + ")"
+        )
+        with self._lock:
+            rows = self.connection.execute(
+                "SELECT rowid, bm25(products, ?, ?, ?, ?, ?, ?, ?) AS score FROM products "
+                "WHERE products MATCH ? ORDER BY score LIMIT ?",
+                (*BM25_WEIGHTS, expression, limit),
+            ).fetchall()
+        return [(int(row[0]), -float(row[1])) for row in rows]
+
     def documents(self, rowids: list[int]) -> dict[int, Document]:
         if not rowids:
             return {}
