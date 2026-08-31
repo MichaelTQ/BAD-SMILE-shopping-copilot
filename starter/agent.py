@@ -16,7 +16,20 @@ import os
 import sys
 from pathlib import Path
 
-_REPO_ROOT = Path(__file__).resolve().parent.parent
+def _find_package_root(module_file: Path) -> Path:
+    """Nearest ancestor of ``module_file`` that holds the ``src`` package.
+
+    Walking up beats assuming a fixed depth: the same file then works both in
+    this repository (``<root>/starter/agent.py``) and in the flat submission
+    layout the rules suggest (``submission/agent.py`` beside ``submission/src/``).
+    """
+    for candidate in (module_file.parent, *module_file.parents):
+        if (candidate / "src" / "index.py").is_file():
+            return candidate
+    return module_file.parent.parent
+
+
+_REPO_ROOT = _find_package_root(Path(__file__).resolve())
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 

@@ -239,27 +239,30 @@ The specification notes the organizer may add natural-language paraphrasing. We
 measured this by rewriting the simulator's sentences at run time (the evaluator
 file is not modified):
 
-| simulator wording | score |
-| --- | --- |
-| original templates | 0.906508 |
-| lightly paraphrased | 0.816268 |
-| heavily paraphrased | 0.816582 |
-| colloquial | 0.822168 |
+| simulator wording | narrow openers | **shipped (wide openers)** |
+| --- | --- | --- |
+| original templates | 0.906508 | 0.906408 |
+| lightly paraphrased | 0.816268 | **0.846778** (+0.031) |
+| heavily paraphrased | 0.816582 | **0.868121** (+0.052) |
+| colloquial | 0.822168 | **0.855730** (+0.034) |
 
-Degradation is ~0.09. Locating it precisely: **the content words are never
-lost** — the proportion of true category terms reaching the query stays at
-100% across all rewrites. What breaks is *slot recognition*: turn-1 category
-parsing falls from 100% to 55% (light), 15% (heavy), 0% (colloquial). Category
-terms survive but are demoted from a weight-3.0 category slot to a weight-1.0
-soft constraint.
+The original degradation was ~0.09. Locating it precisely: **the content words
+are never lost** — the proportion of true category terms reaching the query
+stays at 100% across all rewrites. What breaks is *slot recognition*: turn-1
+category parsing fell from 100% to 55% (light), 15% (heavy), 0% (colloquial).
+Category terms survived but were demoted from a weight-3.0 category slot to a
+weight-1.0 soft constraint.
 
-This matters for planning: the loss is **not** a vocabulary-matching problem,
-so dense/semantic retrieval does not address it. Widening the category trigger
-patterns does — a prototype covering more shopping-intent phrasings restores
-category parsing to 100% at every level, worth **+0.014 / +0.053 / +0.034**
-end-to-end with no change on the original templates. That prototype is not yet
-in the shipped code, and carries a caveat: the rewrites and the wider patterns
-were both authored by us, so the measurement is partly self-referential.
+This is why the loss is **not** a vocabulary-matching problem, and why
+dense/semantic retrieval does not address it. Widening `CATEGORY_OPENERS` does:
+it restores turn-1 category parsing to 100% at every rewrite level and recovers
+most of the gap, with no change on the original templates (the −0.0001 there
+comes from the category-root fix, not from the openers).
+
+Caveat: the rewrites and the wider patterns were both authored by us, so the
+absolute numbers are partly self-referential. The structural finding — loss
+comes from slot recognition, not vocabulary — does not depend on that, since it
+follows from category terms reaching the query 100% of the time regardless.
 
 ## Deployment robustness
 
