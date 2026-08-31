@@ -232,6 +232,27 @@ For reproducible official scoring, leave both LLM variables unset.
 - **Explanations are descriptive rather than causal.** They truthfully state
   matched constraints, price, and rating volume, but do not yet compare why the
   first result outranks the second.
+- **Dense retrieval and LLM reranking are built as switches, not as defaults.**
+  Both halves of the suggested "multi-route retrieval to LLM semantic ranking"
+  pipeline were measured before being turned off. A local 768-dimension
+  embedding separated targets *worse* than the existing lexical features (1.14
+  against 1.31) and, used alone for ordering, pushed the target lower in 24 of
+  38 sessions — simulated constraints are near-verbatim excerpts of a product's
+  own copy, so exact matching beats semantic generalization here. A local LLM
+  likewise lost to the rules on every phrasing the rules cover (96.7% against
+  100%), so it ships as a fallback for the cases where the rules find nothing at
+  all (93.3% against 0%). Both would also need a model service or bundled
+  weights that the scoring environment does not have.
+- **Dual-track routing is implemented but disabled.** Splitting Buying and
+  Browsing into a precision track and a diversity track cost 0.0047 and 0.0025
+  respectively: under exact-match scoring the target lives in one category, so
+  spreading the Top 10 across more of them cannot help it, and gating on hard
+  constraints admitted three more targets while ranking the rest worse.
+- **Overload triggers clarification, not a retrieval cutoff.** The brief
+  suggests halting retrieval when the candidate pool is too general. A turn that
+  returns no products cannot convert under this protocol, so the agent returns
+  its ten best *and* states that it cannot separate them — the same signal
+  without spending a turn.
 - **Public-set tuning remains a generalization risk.** We use ablations,
   deterministic runs, and split-half checks, but only the organizer's private
   800 sessions can establish final generalization.

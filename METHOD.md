@@ -546,6 +546,22 @@ Reasoning mode had to be disabled: with it on, a call took 25.1 s, emitted 573
 tokens and answered *"Athletic Wear"*; with `think: false` it took 0.9 s, emitted
 16 tokens and answered *"Athletic Walking"* correctly.
 
+### Why the LLM ranks nothing
+
+The suggested pipeline ends in "LLM Semantic Ranking", and the LLM here does not
+rank. The rerank stage is where ordering is decided, and the measurements above
+say ordering is exactly where a model helps least: the embedding separated
+targets worse than the lexical features it would replace, and the reranker's
+whole Top-10 score spread is 0.183, so a model would have to be very confident to
+move anything. Against that, an LLM rerank of 20 candidates costs seconds per
+turn — the current agent answers in tens of milliseconds and reports zero tokens.
+
+The LLM is placed where the rules genuinely fail instead. Category-slot
+recognition is the one component whose failure mode is unbounded: the rules score
+100% on every phrasing they cover and 0% outside it, and there the LLM reaches
+93.3%. So it is consulted only when parsing yields no category — the call rate
+equals the rule-failure rate, which is zero on the original templates.
+
 ### Disclosure
 
 | | |
